@@ -1,0 +1,62 @@
+# Hosted test run for WoodpatchCore (see HostApp.swift for why). Generated into
+# Tests/Host/CoreTests.xcodeproj by scripts/mac-test.sh; never committed.
+# The framework target compiles the SAME Sources/ the SwiftPM package does.
+name: CoreTests
+options:
+  bundleIdPrefix: au.com.woodpatch.core
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  WoodpatchCore:
+    type: framework
+    platform: iOS
+    sources: [../../Sources/WoodpatchCore]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: au.com.woodpatch.core.framework
+        ENABLE_TESTABILITY: YES
+  CoreTestHost:
+    type: application
+    platform: iOS
+    sources: [HostApp.swift]
+    info:
+      path: Generated/Info.plist
+      properties:
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: au.com.woodpatch.core.testhost
+  WoodpatchCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../WoodpatchCoreTests
+        excludes: [Fixtures]
+      - path: ../WoodpatchCoreTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: WoodpatchCore
+      - target: CoreTestHost
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: au.com.woodpatch.core.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/CoreTestHost.app/CoreTestHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  CoreTests:
+    build:
+      targets:
+        WoodpatchCore: all
+        CoreTestHost: all
+        WoodpatchCoreTests: [test]
+    test:
+      targets: [WoodpatchCoreTests]
