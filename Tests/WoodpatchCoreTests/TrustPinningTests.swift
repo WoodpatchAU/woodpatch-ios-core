@@ -64,11 +64,22 @@ struct PinnedSessionDelegateTests {
         )
     }
 
+    /// CF identity handles are immutable; the box only satisfies Sendable capture.
+    private final class IdentityBox: @unchecked Sendable {
+        let identity: SecIdentity
+        init(_ identity: SecIdentity) { self.identity = identity }
+    }
+
     private func delegate(identity: SecIdentity? = nil) -> PinnedSessionDelegate {
-        PinnedSessionDelegate(
+        var provider: (@Sendable () -> SecIdentity?)?
+        if let identity {
+            let box = IdentityBox(identity)
+            provider = { box.identity }
+        }
+        return PinnedSessionDelegate(
             pinnedHost: "Pinned.Example.Test", // host match is case-insensitive
             anchors: [Fixtures.certificate("trusted-ca")],
-            clientIdentity: identity.map { id in { id } }
+            clientIdentity: provider
         )
     }
 
