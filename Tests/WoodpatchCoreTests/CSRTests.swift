@@ -63,6 +63,14 @@ struct CSRTests {
         #expect(throws: CertificateSigningRequest.BuildError.commonNameTooLong(65)) {
             try CertificateSigningRequest.build(privateKey: key, commonName: String(repeating: "a", count: 65))
         }
+        // 33 Characters but 66 code points (e + combining acute): openssl refuses, so must we.
+        let decomposed = String(repeating: "e\u{0301}", count: 33)
+        #expect(decomposed.count == 33)
+        #expect(throws: CertificateSigningRequest.BuildError.commonNameTooLong(66)) {
+            try CertificateSigningRequest.build(privateKey: key, commonName: decomposed)
+        }
+        // Precomposed é is one code point each: 33 is fine.
+        _ = try CertificateSigningRequest.build(privateKey: key, commonName: String(repeating: "\u{00E9}", count: 33))
     }
 
     @Test func emptySubjectIsTheSoftphoneShape() throws {

@@ -74,17 +74,57 @@ struct PinnedSessionDelegateTests {
         init(_ identity: SecIdentity) { self.identity = identity }
     }
 
-    private func delegate(identity: SecIdentity? = nil) -> PinnedSessionDelegate {
+    private final class CertsBox: @unchecked Sendable {
+        let certs: [SecCertificate]
+        init(_ certs: [SecCertificate]) { self.certs = certs }
+    }
+
+    private func delegate(
+        identity: SecIdentity? = nil,
+        intermediates: [SecCertificate]? = nil,
+        pinnedHost: String = "Pinned.Example.Test" // host match is case-insensitive
+    ) -> PinnedSessionDelegate {
         var provider: (@Sendable () -> SecIdentity?)?
         if let identity {
             let box = IdentityBox(identity)
             provider = { box.identity }
         }
+        var chain: (@Sendable () -> [SecCertificate])?
+        if let intermediates {
+            let box = CertsBox(intermediates)
+            chain = { box.certs }
+        }
         return PinnedSessionDelegate(
-            pinnedHost: "Pinned.Example.Test", // host match is case-insensitive
+            pinnedHost: pinnedHost,
             anchors: [Fixtures.certificate("trusted-ca")],
-            clientIdentity: provider
+            clientIdentity: provider,
+            clientIntermediates: chain
         )
+    }
+
+    @Test func intermediatesTravelWithTheIdentity() {
+        // Any certificate stands in for "the intermediate"; the test is that the
+        // credential CARRIES what the provider returns (#2653).
+        let intermediate = Fixtures.certificate("rogue-ca")
+        let (d, c) = delegate(identity: Fixtures.clientIdentity(), intermediates: [intermediate])
+            .disposition(for: challenge(host: host, method: NSURLAuthenticationMethodClientCertificate))
+        #expect(d == .useCredential)
+        #expect(c?.certificates.count == 1)
+        #expect((c?.certificates.first as! SecCertificate) == intermediate)
+    }
+
+    @Test func noIntermediatesMeansLeafOnly() {
+        let (_, c) = delegate(identity: Fixtures.clientIdentity(), intermediates: [])
+            .disposition(for: challenge(host: host, method: NSURLAuthenticationMethodClientCertificate))
+        #expect(c?.certificates.isEmpty == true)
+    }
+
+    @Test func trailingDotOnThePinnedHostSideStillPins() {
+        // Kills the "only .lowercased() the pinned host" mutant: the fixture's other
+        // tests configure the pinned host WITHOUT a trailing dot.
+        let d = delegate(pinnedHost: "pinned.example.test.")
+        #expect(d.disposition(for: challenge(host: host, method: NSURLAuthenticationMethodServerTrust)).0
+            == .cancelAuthenticationChallenge)
     }
 
     @Test func otherHostsGetDefaultHandling() {
@@ -123,7 +163,7 @@ struct PinnedSessionDelegateTests {
         #expect(cd == .performDefaultHandling && cc == nil)
     }
 
-    @Test(arguments: ["PINNED.EXAMPLE.TEST", "Pinned.Example.Test", "pinned.example.test."])
+    @Test(arguments: ["PINNED.EXAMPLE.TEST", "Pinned.Example.Test", "pinned.example.test.", "pinned.example.test.."])
     func caseAndTrailingDotStillPin(variant: String) {
         // Pinned → evaluated → no SecTrust in a synthetic challenge → fail-closed cancel
         // (an unpinned host would have got .performDefaultHandling instead).

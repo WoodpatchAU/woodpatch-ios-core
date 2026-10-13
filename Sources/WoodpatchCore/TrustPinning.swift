@@ -103,6 +103,12 @@ public enum TrustPinning {
     /// FROM THE PINNED HOST, and never offered to any other host. Pass nil when
     /// the host doesn't do mTLS.
     ///
+    /// `clientIntermediates` supplies the identity's INTERMEDIATE certificates
+    /// (no leaf, no root), sent with it on each challenge. Without them the
+    /// device sends only its leaf, and a server that doesn't already hold the
+    /// intermediate fails the handshake, which looks exactly like "no cert"
+    /// (-1005) (BOS #2509 condition 4, #2653).
+    ///
     /// When the app's identity CHANGES (pair, re-pair, unpair, renewal), it must
     /// `invalidateAndCancel()` this session and build a new one: TLS session
     /// resumption can outlive what the provider closure returns.
@@ -111,6 +117,7 @@ public enum TrustPinning {
         anchors: [SecCertificate],
         logger: Logger,
         clientIdentity: (@Sendable () -> SecIdentity?)? = nil,
+        clientIntermediates: (@Sendable () -> [SecCertificate])? = nil,
         configuration: URLSessionConfiguration = .default
     ) -> URLSession {
         if anchors.isEmpty {
@@ -123,7 +130,8 @@ public enum TrustPinning {
         let delegate = PinnedSessionDelegate(
             pinnedHost: pinnedHost,
             anchors: anchors,
-            clientIdentity: clientIdentity
+            clientIdentity: clientIdentity,
+            clientIntermediates: clientIntermediates
         )
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
@@ -138,15 +146,18 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     private let pinnedHost: String
     private let anchors: [SecCertificate]
     private let clientIdentity: (@Sendable () -> SecIdentity?)?
+    private let clientIntermediates: (@Sendable () -> [SecCertificate])?
 
     public init(
         pinnedHost: String,
         anchors: [SecCertificate],
-        clientIdentity: (@Sendable () -> SecIdentity?)? = nil
+        clientIdentity: (@Sendable () -> SecIdentity?)? = nil,
+        clientIntermediates: (@Sendable () -> [SecCertificate])? = nil
     ) {
         self.pinnedHost = Self.normalised(pinnedHost)
         self.anchors = anchors
         self.clientIdentity = clientIdentity
+        self.clientIntermediates = clientIntermediates
     }
 
     /// The disposition for one challenge. Split out from the URLSession
@@ -187,20 +198,34 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
             // `.none`: the delegate is asked on every challenge, so caching gains
             // nothing, and a cached credential could outlive an unpair (the
             // provider returning nil must mean no identity is sent).
-            return (.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .none))
+            // Read per challenge, like the identity, so a renewed chain is picked up.
+            let intermediates = clientIntermediates?() ?? []
+            return (
+                .useCredential,
+                URLCredential(
+                    identity: identity,
+                    certificates: intermediates.isEmpty ? nil : intermediates,
+                    persistence: .none
+                )
+            )
 
         default:
             return (.performDefaultHandling, nil)
         }
     }
 
-    /// Exact host equality, case-insensitive, with ONE trailing root dot
-    /// ignored: `Host.` is the same DNS name as `Host`, and leaving it unmatched
-    /// would let a trailing-dot URL skip the pin. No suffix matching, so neither
-    /// a subdomain nor a look-alike suffix inherits the pin or the identity.
+    /// Exact host equality, case-insensitive, with trailing root dots ignored:
+    /// `Host.` is the same DNS name as `Host`, and leaving it unmatched would let a
+    /// trailing-dot URL skip the pin. ALL trailing dots are stripped, so a
+    /// malformed `host..` pins too (fail closed) rather than falling to system
+    /// trust. No suffix matching, so neither a subdomain nor a look-alike suffix
+    /// inherits the pin or the identity.
     static func normalised(_ host: String) -> String {
-        let lower = host.lowercased()
-        return lower.hasSuffix(".") ? String(lower.dropLast()) : lower
+        var lower = host.lowercased()
+        while lower.hasSuffix(".") {
+            lower.removeLast()
+        }
+        return lower
     }
 
     public func urlSession(
