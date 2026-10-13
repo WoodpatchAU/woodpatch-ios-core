@@ -102,6 +102,10 @@ public enum TrustPinning {
     /// `clientIdentity` is consulted ONLY for a client-certificate challenge
     /// FROM THE PINNED HOST, and never offered to any other host. Pass nil when
     /// the host doesn't do mTLS.
+    ///
+    /// When the app's identity CHANGES (pair, re-pair, unpair, renewal), it must
+    /// `invalidateAndCancel()` this session and build a new one: TLS session
+    /// resumption can outlive what the provider closure returns.
     public static func pinnedSession(
         pinnedHost: String,
         anchors: [SecCertificate],
@@ -140,7 +144,7 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         anchors: [SecCertificate],
         clientIdentity: (@Sendable () -> SecIdentity?)? = nil
     ) {
-        self.pinnedHost = pinnedHost.lowercased()
+        self.pinnedHost = Self.normalised(pinnedHost)
         self.anchors = anchors
         self.clientIdentity = clientIdentity
     }
@@ -153,7 +157,7 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         let space = challenge.protectionSpace
         // Anything that isn't for the pinned host gets default handling: system
         // trust, and no client identity is EVER offered to another host.
-        guard space.host.lowercased() == pinnedHost else {
+        guard Self.normalised(space.host) == pinnedHost else {
             return (.performDefaultHandling, nil)
         }
 
@@ -180,11 +184,23 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
             guard let identity = clientIdentity?() else {
                 return (.performDefaultHandling, nil)
             }
-            return (.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .forSession))
+            // `.none`: the delegate is asked on every challenge, so caching gains
+            // nothing, and a cached credential could outlive an unpair (the
+            // provider returning nil must mean no identity is sent).
+            return (.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .none))
 
         default:
             return (.performDefaultHandling, nil)
         }
+    }
+
+    /// Exact host equality, case-insensitive, with ONE trailing root dot
+    /// ignored: `Host.` is the same DNS name as `Host`, and leaving it unmatched
+    /// would let a trailing-dot URL skip the pin. No suffix matching, so neither
+    /// a subdomain nor a look-alike suffix inherits the pin or the identity.
+    static func normalised(_ host: String) -> String {
+        let lower = host.lowercased()
+        return lower.hasSuffix(".") ? String(lower.dropLast()) : lower
     }
 
     public func urlSession(

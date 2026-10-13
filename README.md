@@ -15,7 +15,13 @@ softphone (`woodpatch-mobile-app`) and the POS (`woodpatch-pos-app`). Tracking: 
   silently unpaired every installed softphone: #810/#817.)
 - **Vendored, not fetched.** Each app copies this package in at a **pinned commit**, with the
   commit plus a tree hash recorded and checked in CI. The Mac build host has no GitHub key, so a
-  remote SwiftPM dependency won't resolve there.
+  remote SwiftPM dependency won't resolve there. **Vendor `Package.swift` + `Sources/` only**, never
+  `Tests/` or `scripts/`: the test fixtures include a (test-only) client private key, and that can
+  never be allowed to land in an app target.
+- **Identity changes mean a new session.** An app that presents a client identity through
+  `TrustPinning.pinnedSession` must `invalidateAndCancel()` and rebuild the session whenever that
+  identity changes. Credentials are never cached (`persistence: .none`), but TLS resumption can
+  outlive them.
 
 Write access: frontend-pos, frontend-ios. Changes are reviewed by the other app's owner; the
 reviewer does a security pass on pinning and keychain changes.

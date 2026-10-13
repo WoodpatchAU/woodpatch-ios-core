@@ -6,14 +6,18 @@
 #      bundles get -34018 from every keychain call in the Simulator), with per-test
 #      time limits so a hang fails rather than stalls;
 #   → per-device counts from the result bundle (zero tests = FAILURE) →
-#   openssl interop: `openssl req -verify` on the Secure-Enclave-signed CSR the test
-#   suite wrote out (Apple-Silicon Simulators create real enclave keys).
+#   openssl interop: `openssl req -verify` on the CSRs the suite wrote out, the
+#   software-key one (EVERY run) and the Secure-Enclave one (Apple-Silicon Simulators
+#   have a real enclave). A missing CSR is a FAILURE, not a "not verified" note.
 # Env: MAC_HOST (REQUIRED, the Mac's LAN address), SSH_KEY (default: the role key),
-#      SIM (default "iPhone 17").
+#      SIM (default "iPhone 17"), REQUIRE_ENCLAVE (default 1; 0 only for a
+#      destination known to have no enclave).
 set -euo pipefail
 MAC_HOST="${MAC_HOST:?set MAC_HOST to the Mac build host address}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/$(id -un)_ed25519}"
 SIM="${SIM:-iPhone 17}"
+REQUIRE_ENCLAVE="${REQUIRE_ENCLAVE:-1}"
+[[ "$REQUIRE_ENCLAVE" =~ ^[01]$ ]] || { echo "REQUIRE_ENCLAVE must be 0 or 1" >&2; exit 2; }
 [[ "$SIM" =~ ^[A-Za-z0-9\ ()._-]+$ ]] || { echo "unsafe simulator name: $SIM" >&2; exit 2; }
 
 repo="$(git rev-parse --show-toplevel)"
@@ -42,13 +46,17 @@ ssh -i "$SSH_KEY" -o BatchMode=yes "claude@$MAC_HOST" "set -o pipefail
   grep -E '✘|error:|warning: .*/Sources/|TEST (SUCCEEDED|FAILED)' \$log | tail -40
   xcrun xcresulttool get test-results summary --path \$res --compact \\
     | /usr/bin/python3 \$dir/scripts/xcresult-summary.py 1 || rc=1
-  csr=\$(find ~/Library/Developer/CoreSimulator/Devices -name enclave-csr.pem -newer \$marker 2>/dev/null | head -1)
-  if [ -n \"\$csr\" ]; then
-    /opt/homebrew/bin/openssl req -in \"\$csr\" -verify -noout 2>&1 | sed 's/^/  interop: /' || rc=1
-    rm -f \"\$csr\"
-  else
-    echo '  interop: no enclave CSR written (no Secure Enclave in this Simulator?): NOT verified'
-  fi
+  for name in software-csr enclave-csr; do
+    csr=\$(find ~/Library/Developer/CoreSimulator/Devices -name \$name.pem -newer \$marker 2>/dev/null | head -1)
+    if [ -n \"\$csr\" ]; then
+      /opt/homebrew/bin/openssl req -in \"\$csr\" -verify -noout 2>&1 | sed \"s/^/  interop \$name: /\" || rc=1
+      rm -f \"\$csr\"
+    elif [ \$name = enclave-csr ] && [ $REQUIRE_ENCLAVE = 0 ]; then
+      echo \"  interop \$name: not expected here (REQUIRE_ENCLAVE=0)\"
+    else
+      echo \"  interop \$name: MISSING, so NOT verified (failure)\"; rc=1
+    fi
+  done
   rm -rf \$dir \$res \$marker
   echo \"(full log on the Mac: \$log)\"
   exit \$rc"
