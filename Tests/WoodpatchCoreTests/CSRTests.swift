@@ -10,6 +10,23 @@ import Testing
 @testable import WoodpatchCore
 
 struct CSRTests {
+    /// Real Secure Enclave keys exist on devices and on Apple-Silicon Simulators.
+    static let enclaveAvailable: Bool = {
+        var error: Unmanaged<CFError>?
+        return SecKeyCreateRandomKey([
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+        ] as CFDictionary, &error) != nil
+    }()
+
+    /// Where the runner (scripts/mac-test.sh) picks CSRs up for `openssl req -verify`.
+    static func writeForInterop(_ pem: String, name: String) throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("woodpatchcore-interop")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try pem.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
     private func p256Key(enclave: Bool = false) throws -> SecKey {
         var attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -35,6 +52,17 @@ struct CSRTests {
         #expect(ok)
         #expect(built.pem.hasPrefix("-----BEGIN CERTIFICATE REQUEST-----\n"))
         #expect(built.pem.hasSuffix("-----END CERTIFICATE REQUEST-----\n"))
+        // Interop on EVERY run (not only when an enclave exists): the runner
+        // openssl-verifies this one and fails if it's missing.
+        try Self.writeForInterop(built.pem, name: "software-csr.pem")
+    }
+
+    @Test func commonNameLengthIsCapped() throws {
+        let key = try p256Key()
+        _ = try CertificateSigningRequest.build(privateKey: key, commonName: String(repeating: "a", count: 64))
+        #expect(throws: CertificateSigningRequest.BuildError.commonNameTooLong(65)) {
+            try CertificateSigningRequest.build(privateKey: key, commonName: String(repeating: "a", count: 65))
+        }
     }
 
     @Test func emptySubjectIsTheSoftphoneShape() throws {
@@ -57,13 +85,13 @@ struct CSRTests {
         }
     }
 
-    @Test func enclaveKeyWhenAvailable() throws {
-        guard let key = try? p256Key(enclave: true) else { return } // no enclave here: nothing to prove
+    /// Shows as SKIPPED (not passed) where there's no enclave, and the runner
+    /// then fails its enclave interop check unless told not to expect one.
+    @Test(.enabled(if: CSRTests.enclaveAvailable, "no Secure Enclave on this destination"))
+    func enclaveKey() throws {
+        let key = try p256Key(enclave: true)
         let built = try CertificateSigningRequest.build(privateKey: key, commonName: "enclave-device")
-        // Write for the runner's `openssl req -verify` interop check.
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("woodpatchcore-interop")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try built.pem.write(to: dir.appendingPathComponent("enclave-csr.pem"), atomically: true, encoding: .utf8)
+        try Self.writeForInterop(built.pem, name: "enclave-csr.pem")
         #expect(SecKeyCopyExternalRepresentation(key, nil) == nil) // the private half never leaves
     }
 }
@@ -79,6 +107,7 @@ struct DERTests {
         #expect(DER.integer([0x00, 0x00, 0x05]) == [0x02, 0x01, 0x05])
         #expect(DER.integer([0x80]) == [0x02, 0x02, 0x00, 0x80])
         #expect(DER.integer(UInt8(0)) == [0x02, 0x01, 0x00])
+        #expect(DER.integer([]) == [0x02, 0x01, 0x00]) // empty magnitude = zero, never `02 00`
     }
 
     @Test func pemWrapsAt64() {

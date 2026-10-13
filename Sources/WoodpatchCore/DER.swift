@@ -52,7 +52,8 @@ public enum DER {
     /// Unsigned big-endian magnitude → DER INTEGER: leading zero bytes are
     /// stripped, and one is re-added if the high bit would make it negative.
     public static func integer(_ magnitude: [UInt8]) -> [UInt8] {
-        var bytes = magnitude
+        // An empty magnitude is zero (a bare `02 00` would be invalid DER).
+        var bytes = magnitude.isEmpty ? [0x00] : magnitude
         while bytes.count > 1, bytes.first == 0x00 {
             bytes.removeFirst()
         }

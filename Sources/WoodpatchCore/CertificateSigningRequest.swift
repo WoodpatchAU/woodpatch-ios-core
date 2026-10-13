@@ -31,8 +31,12 @@ public enum CertificateSigningRequest {
         public let pem: String
     }
 
+    /// X.520 upper bound for a commonName; `openssl req` refuses longer.
+    public static let maxCommonNameLength = 64
+
     public enum BuildError: Error, Sendable, Equatable {
         case notP256PrivateKey
+        case commonNameTooLong(Int)
         case publicKeyUnavailable(String)
         case signFailed(String)
     }
@@ -41,6 +45,9 @@ public enum CertificateSigningRequest {
     /// `commonName` nil gives an empty subject (`30 00`), which is the
     /// softphone's shape: the server assigns identity, not the CSR.
     public static func build(privateKey: SecKey, commonName: String? = nil) throws -> Built {
+        if let commonName, commonName.count > maxCommonNameLength {
+            throw BuildError.commonNameTooLong(commonName.count)
+        }
         let subject: [UInt8]
         if let commonName {
             let rdn = DER.set(DER.sequence(DER.OID.commonName + DER.utf8String(commonName)))
@@ -93,6 +100,10 @@ public enum CertificateSigningRequest {
         var error: Unmanaged<CFError>?
         guard let point = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
             throw BuildError.publicKeyUnavailable(Self.describe(error))
+        }
+        // Uncompressed P-256 point: 0x04 || X(32) || Y(32), as the old SIPKeyPair checked.
+        guard point.count == 65, point.first == 0x04 else {
+            throw BuildError.publicKeyUnavailable("unexpected public key encoding (\(point.count) bytes)")
         }
         return [UInt8](point)
     }

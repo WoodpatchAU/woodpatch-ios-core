@@ -16,6 +16,10 @@ struct TrustDecisionTests {
 
     @Test func rejectsAChainToAnotherCA() {
         // The MITM case: a valid cert for the right host from a CA we don't pin.
+        // Note: this would pass even without SecTrustSetAnchorCertificatesOnly,
+        // because the test rogue CA isn't in the system store. That property (a
+        // PUBLIC-CA cert is refused) is release-gated on device by the softphone's
+        // APIPinDiagnostic, not by this unit test.
         let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("rogue-leaf"), host: host)
         let decision = TrustPinning.evaluate(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")])
         #expect(decision != .accept)
@@ -105,6 +109,26 @@ struct PinnedSessionDelegateTests {
             .disposition(for: challenge(host: host, method: NSURLAuthenticationMethodClientCertificate))
         #expect(d == .useCredential)
         #expect(c?.identity != nil)
+        // Never cached: an unpair (provider → nil) must mean no identity is sent.
+        #expect(c?.persistence == URLCredential.Persistence.none)
+    }
+
+    /// Exact-match only: a hasSuffix/contains mutant, or dropping normalisation of
+    /// the CHALLENGE host, fails one of these.
+    @Test(arguments: ["sub.pinned.example.test", "pinned.example.test.evil.test", "xpinned.example.test"])
+    func lookAlikeHostsAreNotPinnedAndGetNoIdentity(other: String) {
+        let d = delegate(identity: Fixtures.clientIdentity())
+        #expect(d.disposition(for: challenge(host: other, method: NSURLAuthenticationMethodServerTrust)).0 == .performDefaultHandling)
+        let (cd, cc) = d.disposition(for: challenge(host: other, method: NSURLAuthenticationMethodClientCertificate))
+        #expect(cd == .performDefaultHandling && cc == nil)
+    }
+
+    @Test(arguments: ["PINNED.EXAMPLE.TEST", "Pinned.Example.Test", "pinned.example.test."])
+    func caseAndTrailingDotStillPin(variant: String) {
+        // Pinned → evaluated → no SecTrust in a synthetic challenge → fail-closed cancel
+        // (an unpinned host would have got .performDefaultHandling instead).
+        #expect(delegate().disposition(for: challenge(host: variant, method: NSURLAuthenticationMethodServerTrust)).0
+            == .cancelAuthenticationChallenge)
     }
 
     @Test func identityIsNeverOfferedToAnotherHost() {
