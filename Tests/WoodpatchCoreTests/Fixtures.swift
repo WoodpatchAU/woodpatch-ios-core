@@ -5,8 +5,20 @@ import Security
 @testable import WoodpatchCore
 
 enum Fixtures {
+    /// SwiftPM gives the test target `Bundle.module`; the hosted xcodegen run
+    /// (Tests/Host) copies Fixtures into the test bundle itself.
+    static var bundle: Bundle {
+        #if SWIFT_PACKAGE
+        .module
+        #else
+        Bundle(for: BundleToken.self)
+        #endif
+    }
+
+    private final class BundleToken {}
+
     static func url(_ name: String, _ ext: String) -> URL {
-        Bundle.module.url(forResource: name, withExtension: ext, subdirectory: "Fixtures")!
+        bundle.url(forResource: name, withExtension: ext, subdirectory: "Fixtures")!
     }
 
     static func certificate(_ name: String) -> SecCertificate {
@@ -25,6 +37,9 @@ enum Fixtures {
         return first[kSecImportItemIdentity as String] as! SecIdentity
     }
 
+    /// Inside every fixture's validity window (leaves: 2026-10-13 + 800 days).
+    static let evaluationDate = Date(timeIntervalSince1970: 1_800_000_000) // 2027-01-15
+
     /// A server trust for `leaf` as if presented for `host`.
     static func serverTrust(leaf: SecCertificate, host: String) -> SecTrust {
         var trust: SecTrust?
@@ -32,7 +47,7 @@ enum Fixtures {
         precondition(status == errSecSuccess)
         // Fixed evaluation date inside every fixture's validity window, so the
         // tests don't depend on the wall clock.
-        SecTrustSetVerifyDate(trust!, Date(timeIntervalSince1970: 1_800_000_000) as CFDate)
+        SecTrustSetVerifyDate(trust!, Fixtures.evaluationDate as CFDate)
         return trust!
     }
 }

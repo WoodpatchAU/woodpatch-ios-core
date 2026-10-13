@@ -1,8 +1,10 @@
 #!/bin/bash
 # Regenerate the TEST-ONLY PKI in Tests/WoodpatchCoreTests/Fixtures. These certs exist
 # solely for unit tests; nothing ships them and nothing trusts them outside the tests.
-# Long validity (10 y) so the tests don't rot. Apple's 398-day limit applies only to certs
-# that chain to system roots, and these never do.
+# CAs live 10 y. LEAVES live 800 days: Apple rejects ANY TLS server cert valid > 825 days
+# ("not standards compliant"), private CA or not; only the 398-day rule is public-root-only.
+# The tests evaluate at a FIXED date (Fixtures.swift), so expiry never rots them; regenerate
+# only if that date has to move.
 #   trusted-ca.pem      anchor the tests pin to
 #   pinned-leaf.pem     server cert for pinned.example.test, issued by trusted-ca
 #   rogue-ca.pem        a different CA (stands in for a public/mis-issuing CA)
@@ -17,7 +19,7 @@ mkca() { openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/$1.key"
 mkleaf() { openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/$1.key"
   openssl req -new -key "$tmp/$1.key" -subj "/CN=$3" -out "$tmp/$1.csr"
   openssl x509 -req -in "$tmp/$1.csr" -CA "$2.pem" -CAkey "$tmp/$2.key" -CAcreateserial -CAserial "$tmp/$2.srl" \
-    -days 3650 -sha256 -extfile <(printf "%s\n" "$4") -out "$1.pem"; }
+    -days 800 -sha256 -extfile <(printf "%s\n" "$4") -out "$1.pem"; }
 mkca trusted-ca "WoodpatchCore TEST trusted CA"
 mkca rogue-ca "WoodpatchCore TEST rogue CA"
 SERVER=$'subjectAltName=DNS:pinned.example.test\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature'

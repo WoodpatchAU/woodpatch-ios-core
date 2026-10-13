@@ -1,7 +1,11 @@
 #!/bin/bash
 # mac-test.sh: test WoodpatchCore on the Mac build host, run from the Linux dev box.
-#   bundle HEAD → scp → clone on the Mac → `xcodebuild test` the package in an iOS
-#   Simulator → per-device counts from the result bundle (zero tests = FAILURE) →
+#   bundle HEAD → scp → clone on the Mac →
+#   1. `xcodebuild build` of the SwiftPM package (how the apps consume it);
+#   2. the test suite HOSTED in Tests/Host's throwaway app (unhosted SwiftPM test
+#      bundles get -34018 from every keychain call in the Simulator), with per-test
+#      time limits so a hang fails rather than stalls;
+#   → per-device counts from the result bundle (zero tests = FAILURE) →
 #   openssl interop: `openssl req -verify` on the Secure-Enclave-signed CSR the test
 #   suite wrote out (Apple-Silicon Simulators create real enclave keys).
 # Env: MAC_HOST (REQUIRED, the Mac's LAN address), SSH_KEY (default: the role key),
@@ -26,8 +30,15 @@ ssh -i "$SSH_KEY" -o BatchMode=yes "claude@$MAC_HOST" "set -o pipefail
   dir=~/pos/core-$sha log=~/pos/core-$sha.log res=~/pos/core-$sha.xcresult
   rm -rf \$dir \$res && git -c advice.detachedHead=false clone -q /tmp/core-$sha.bundle \$dir && rm -f /tmp/core-$sha.bundle
   marker=\$(mktemp); cd \$dir
-  xcodebuild test -scheme WoodpatchCore -destination 'platform=iOS Simulator,name=$SIM' \
-    -derivedDataPath ~/pos/core-dd -resultBundlePath \$res >\$log 2>&1; rc=\$?
+  if ! xcodebuild build -scheme WoodpatchCore -destination 'generic/platform=iOS Simulator' \
+       -derivedDataPath ~/pos/core-dd >\$log.spm 2>&1; then
+    echo '  SwiftPM build FAILED:'; grep -E 'error:' \$log.spm | head -20; rm -rf \$dir; exit 1
+  fi
+  echo '  SwiftPM package build: OK'
+  cd Tests/Host && /opt/homebrew/bin/xcodegen generate >/dev/null
+  xcodebuild test -project CoreTests.xcodeproj -scheme CoreTests -destination 'platform=iOS Simulator,name=$SIM' \
+    -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 \
+    -derivedDataPath ~/pos/core-dd-hosted -resultBundlePath \$res >\$log 2>&1; rc=\$?
   grep -E '✘|error:|warning: .*/Sources/|TEST (SUCCEEDED|FAILED)' \$log | tail -40
   xcrun xcresulttool get test-results summary --path \$res --compact \\
     | /usr/bin/python3 \$dir/scripts/xcresult-summary.py 1 || rc=1

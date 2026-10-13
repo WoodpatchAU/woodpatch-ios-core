@@ -40,7 +40,7 @@ struct TrustDecisionTests {
     }
 
     @Test func missingAnchorResourceIsEmpty() {
-        #expect(TrustPinning.loadAnchors(bundle: .module, resource: "does-not-exist").isEmpty)
+        #expect(TrustPinning.loadAnchors(bundle: Fixtures.bundle, resource: "does-not-exist").isEmpty)
     }
 }
 
