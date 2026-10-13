@@ -1,0 +1,42 @@
+# SwiftFormat config — committed so any contributor (Claude
+# instance or human on a Mac) formats identically. Run with
+# `swiftformat .` from the repo root. Rules below are explicit
+# even where they match the SwiftFormat default, so future
+# upstream-default drift can't silently change our codebase.
+
+--swiftversion 6.0
+
+# ── Layout ──────────────────────────────────────────────────────────
+--indent 4
+--linebreaks lf
+--maxwidth 100
+--tabwidth 4
+--smarttabs enabled
+--trimwhitespace always
+--commas inline
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--wrapconditions before-first
+--closingparen balanced
+
+# ── Style ───────────────────────────────────────────────────────────
+--self remove
+--semicolons never
+--ranges spaced
+--operatorfunc spaced
+--patternlet hoist
+--elseposition same-line
+--guardelse same-line
+--stripunusedargs closure-only
+--funcattributes prev-line
+--typeattributes prev-line
+--storedvarattrs same-line
+
+# ── File header ─────────────────────────────────────────────────────
+# Intentionally NOT enforced — our files use a freeform header
+# comment block, not the standard `// Copyright ...` pattern.
+--header ignore
+
+# ── Excludes ────────────────────────────────────────────────────────
+--exclude DerivedData,.build,Pods,Carthage,vendor
