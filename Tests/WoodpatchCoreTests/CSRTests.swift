@@ -1,0 +1,90 @@
+// CSRTests.swift: PKCS#10 layout and signature, for a software key here. The
+// Secure Enclave path is exercised by the POS spike (BOS #2509); on Apple
+// Silicon the Simulator also creates enclave keys, so it's tested too when
+// available. Interop with openssl: the test writes the PEM where
+// scripts/mac-test.sh runs `openssl req -verify` on it.
+
+import Foundation
+import Security
+import Testing
+@testable import WoodpatchCore
+
+struct CSRTests {
+    private func p256Key(enclave: Bool = false) throws -> SecKey {
+        var attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+        ]
+        if enclave {
+            attributes[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
+        }
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+            throw error!.takeRetainedValue()
+        }
+        return key
+    }
+
+    @Test func signatureVerifiesOverTheInfo() throws {
+        let key = try p256Key()
+        let built = try CertificateSigningRequest.build(privateKey: key, commonName: "device-1")
+        let ok = SecKeyVerifySignature(
+            SecKeyCopyPublicKey(key)!, .ecdsaSignatureMessageX962SHA256,
+            Data(built.certificationRequestInfoDER) as CFData, built.signatureDER as CFData, nil
+        )
+        #expect(ok)
+        #expect(built.pem.hasPrefix("-----BEGIN CERTIFICATE REQUEST-----\n"))
+        #expect(built.pem.hasSuffix("-----END CERTIFICATE REQUEST-----\n"))
+    }
+
+    @Test func emptySubjectIsTheSoftphoneShape() throws {
+        let info = try CertificateSigningRequest.build(privateKey: try p256Key()).certificationRequestInfoDER
+        // SEQUENCE { INTEGER 0, SEQUENCE {} (empty Name), … }: skip the outer
+        // SEQUENCE header (short or long form length), then check the first fields.
+        #expect(info.first == 0x30)
+        let header = info[1] < 0x80 ? 2 : 2 + Int(info[1] & 0x7F)
+        #expect(Array(info[header ..< header + 5]) == [0x02, 0x01, 0x00, 0x30, 0x00])
+        #expect(Array(info.suffix(2)) == [0xA0, 0x00]) // empty attributes
+    }
+
+    @Test func rejectsANonP256Key() throws {
+        var error: Unmanaged<CFError>?
+        let rsa = SecKeyCreateRandomKey([
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA, kSecAttrKeySizeInBits as String: 2048,
+        ] as CFDictionary, &error)!
+        #expect(throws: CertificateSigningRequest.BuildError.notP256PrivateKey) {
+            try CertificateSigningRequest.build(privateKey: rsa)
+        }
+    }
+
+    @Test func enclaveKeyWhenAvailable() throws {
+        guard let key = try? p256Key(enclave: true) else { return } // no enclave here: nothing to prove
+        let built = try CertificateSigningRequest.build(privateKey: key, commonName: "enclave-device")
+        // Write for the runner's `openssl req -verify` interop check.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("woodpatchcore-interop")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try built.pem.write(to: dir.appendingPathComponent("enclave-csr.pem"), atomically: true, encoding: .utf8)
+        #expect(SecKeyCopyExternalRepresentation(key, nil) == nil) // the private half never leaves
+    }
+}
+
+struct DERTests {
+    @Test func lengths() {
+        #expect(DER.encodeLength(0x7F) == [0x7F])
+        #expect(DER.encodeLength(0x80) == [0x81, 0x80])
+        #expect(DER.encodeLength(0x1234) == [0x82, 0x12, 0x34])
+    }
+
+    @Test func integerMagnitude() {
+        #expect(DER.integer([0x00, 0x00, 0x05]) == [0x02, 0x01, 0x05])
+        #expect(DER.integer([0x80]) == [0x02, 0x02, 0x00, 0x80])
+        #expect(DER.integer(UInt8(0)) == [0x02, 0x01, 0x00])
+    }
+
+    @Test func pemWrapsAt64() {
+        let pem = DER.pem([UInt8](repeating: 0xAB, count: 100), label: "X")
+        let body = pem.split(separator: "\n").dropFirst().dropLast()
+        #expect(body.allSatisfy { $0.count <= 64 })
+        #expect(body.first?.count == 64)
+    }
+}
