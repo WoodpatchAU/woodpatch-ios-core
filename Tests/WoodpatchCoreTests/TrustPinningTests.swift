@@ -84,11 +84,15 @@ struct PinnedSessionDelegateTests {
         box: CredentialBox? = nil,
         pinnedHost: String = "Pinned.Example.Test" // host match is case-insensitive
     ) -> PinnedSessionDelegate {
-        let source = box ?? credential.map { CredentialBox($0) }
+        // Built explicitly: a closure-returning `Optional.map` crashes the type checker.
+        var source: CredentialBox? = box
+        if source == nil, let credential { source = CredentialBox(credential) }
+        var provider: (@Sendable () -> ClientTLSCredential?)?
+        if let source { provider = { source.current } }
         return PinnedSessionDelegate(
             pinnedHost: pinnedHost,
             anchors: [Fixtures.certificate("trusted-ca")],
-            clientCredential: source.map { box in { box.current } }
+            clientCredential: provider
         )
     }
 
