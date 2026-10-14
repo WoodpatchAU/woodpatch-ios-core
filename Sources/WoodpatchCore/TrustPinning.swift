@@ -122,9 +122,7 @@ public enum TrustPinning {
         if anchors.isEmpty {
             // A packaging defect (an anchor-integrity test should catch it in CI).
             // Log loudly; the delegate rejects the pinned host rather than falling open.
-            logger.critical(
-                "NO bundled server anchor; pinned host \(pinnedHost, privacy: .public) will FAIL-CLOSED"
-            )
+            logger.critical("NO bundled server anchor: the pinned host will FAIL-CLOSED")
         }
         let delegate = PinnedSessionDelegate(
             pinnedHost: pinnedHost,
@@ -291,23 +289,46 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         return lower
     }
 
-    /// The normalised pinned host, or nil if it isn't a plausible DNS name or IPv4
-    /// literal: dot-separated LDH labels (a-z, 0-9, '-'), each 1-63 characters and
-    /// not starting or ending with '-', at most 253 characters in all. Anything
-    /// else is a configuration error that would otherwise pin nothing: a URL, a
-    /// port, a path, whitespace, an empty label, non-ASCII (use the punycode
-    /// form), or an IPv6 literal (not supported).
+    /// The normalised pinned host, or nil if it isn't a DNS name or a canonical
+    /// IPv4 literal. A DNS name is dot-separated LDH labels (a-z, 0-9, '-'), each
+    /// 1-63 characters and not starting or ending with '-', at most 253 in all,
+    /// whose LAST label isn't all digits (a TLD never is, RFC 3696 §2). A name
+    /// ending in an all-digit label must be a canonical dotted quad: four decimal
+    /// octets 0-255 with no leading zeros. Otherwise "010.0.0.5", "1.1.1",
+    /// "256.1.1.1" or "2130706433" would be accepted, never equal the URL's
+    /// canonical "10.0.0.5", and leave the REAL host on system trust.
+    /// Anything else is a configuration error that would otherwise pin nothing:
+    /// a URL, a port, a path, whitespace, an empty label, non-ASCII (use the
+    /// punycode form), or an IPv6 literal (not supported).
     static func validatedPinnedHost(_ host: String) -> String? {
         let host = normalised(host)
         guard !host.isEmpty, host.utf8.count <= 253 else { return nil }
-        for label in host.split(separator: ".", omittingEmptySubsequences: false) {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        for label in labels {
             let bytes = label.utf8
             guard (1 ... 63).contains(bytes.count),
                   bytes.first != UInt8(ascii: "-"), bytes.last != UInt8(ascii: "-"),
                   bytes.allSatisfy(isLDH)
             else { return nil }
         }
+        if let last = labels.last, last.utf8.allSatisfy(isDigit) {
+            return isCanonicalIPv4(labels) ? host : nil
+        }
         return host
+    }
+
+    /// Exactly four decimal octets, each 0-255, with no leading zeros.
+    private static func isCanonicalIPv4(_ labels: [Substring]) -> Bool {
+        labels.count == 4 && labels.allSatisfy { octet in
+            octet.utf8.allSatisfy(isDigit)
+                && octet.utf8.count <= 3
+                && (octet.utf8.count == 1 || octet.utf8.first != UInt8(ascii: "0"))
+                && (Int(octet).map { $0 <= 255 } ?? false)
+        }
+    }
+
+    private static func isDigit(_ byte: UInt8) -> Bool {
+        (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte)
     }
 
     private static func isLDH(_ byte: UInt8) -> Bool {

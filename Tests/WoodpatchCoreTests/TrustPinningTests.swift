@@ -159,6 +159,9 @@ struct PinnedSessionDelegateTests {
         "pinned_x.example.test", "pinnéd.example.test", "::1", "[::1]",
         String(repeating: "a", count: 64) + ".example.test",
         [63, 63, 63, 62].map { String(repeating: "a", count: $0) }.joined(separator: "."), // 254
+        // Non-canonical IPv4 (reviewer, ios-core #6): none equals the URL's canonical form.
+        "010.1.1.1", "1.1.1", "0x7f.0.0.1", "256.1.1.1", "1", "2130706433",
+        "1.2.3.4.5", "1.2.3.00", "pinned.example.123",
     ]
 
     @Test(arguments: invalidPinnedHosts)
@@ -186,6 +189,7 @@ struct PinnedSessionDelegateTests {
 
     @Test(arguments: [
         "pinned.example.test", "Pinned.Example.Test.", "localhost", "127.0.0.1", "xn--pinnd-fsa.example.test",
+        "10.0.0.5", "0.0.0.0", "255.255.255.255", "123.example.test", "3com.example.test",
         String(repeating: "a", count: 63) + ".test",
         [63, 63, 63, 61].map { String(repeating: "a", count: $0) }.joined(separator: "."), // 253
     ])

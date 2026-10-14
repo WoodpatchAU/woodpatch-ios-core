@@ -41,7 +41,7 @@ reviewer does a security pass on pinning and keychain changes.
 ## Testing
 
 ```bash
-MAC_HOST=<the Mac's LAN address> scripts/mac-test.sh
+MAC_HOST=<the Mac's address> MAC_USER=<its SSH user> scripts/mac-test.sh
 ```
 
 It runs on the Mac build host:
