@@ -149,11 +149,48 @@ struct PinnedSessionDelegateTests {
         #expect(after == .performDefaultHandling && credential == nil)
     }
 
-    @Test(arguments: ["", ".", ".."])
-    func emptyPinnedHostFailsClosed(pinned: String) {
+    /// Malformed pinned hosts. Before v1.4 only "", "." and ".." failed closed; the
+    /// rest matched nothing, so the REAL host fell through to system trust.
+    static let invalidPinnedHosts: [String] = [
+        "", ".", "..",
+        "https://pinned.example.test", "pinned.example.test:443", "pinned.example.test/api",
+        " pinned.example.test", "pinned.example.test ", "pinned example.test",
+        "-pinned.example.test", "pinned-.example.test", "pinned..example.test", ".pinned.example.test",
+        "pinned_x.example.test", "pinnéd.example.test", "::1", "[::1]",
+        String(repeating: "a", count: 64) + ".example.test",
+        [63, 63, 63, 62].map { String(repeating: "a", count: $0) }.joined(separator: "."), // 254
+    ]
+
+    @Test(arguments: invalidPinnedHosts)
+    func invalidPinnedHostFailsClosed(pinned: String) {
+        #expect(PinnedSessionDelegate.validatedPinnedHost(pinned) == nil)
         let d = delegate(pinnedHost: pinned)
-        #expect(d.disposition(for: challenge(host: "anything.test", method: NSURLAuthenticationMethodServerTrust)).0
-            == .cancelAuthenticationChallenge)
+        // The real host the config meant, and any other host: both refused.
+        for target in [host, "anything.test"] {
+            #expect(d.disposition(for: challenge(host: target, method: NSURLAuthenticationMethodServerTrust)).0
+                == .cancelAuthenticationChallenge)
+        }
+    }
+
+    /// Reviewer, ios-core #4: with an invalid (here empty) pinned host and a
+    /// credential configured, a client-certificate challenge offers no identity,
+    /// even from an empty challenge host (normalised("") == "" used to match).
+    @Test(arguments: ["", "https://pinned.example.test"])
+    func invalidPinnedHostOffersNoIdentity(pinned: String) {
+        let d = delegate(credential: ClientTLSCredential(identity: Fixtures.clientIdentity()), pinnedHost: pinned)
+        for target in ["", host] {
+            let (cd, cc) = d.disposition(for: challenge(host: target, method: NSURLAuthenticationMethodClientCertificate))
+            #expect(cd == .performDefaultHandling && cc == nil)
+        }
+    }
+
+    @Test(arguments: [
+        "pinned.example.test", "Pinned.Example.Test.", "localhost", "127.0.0.1", "xn--pinnd-fsa.example.test",
+        String(repeating: "a", count: 63) + ".test",
+        [63, 63, 63, 61].map { String(repeating: "a", count: $0) }.joined(separator: "."), // 253
+    ])
+    func validPinnedHostsAreKept(pinned: String) {
+        #expect(PinnedSessionDelegate.validatedPinnedHost(pinned) == pinned.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")))
     }
 
     @Test func trailingDotOnThePinnedHostSideStillPins() {
