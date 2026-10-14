@@ -99,15 +99,14 @@ public enum TrustPinning {
     /// anchors the delegate fail-closes (rejects the pinned host), so the caller
     /// must NOT substitute an unpinned session for the pinned host.
     ///
-    /// `clientIdentity` is consulted ONLY for a client-certificate challenge
-    /// FROM THE PINNED HOST, and never offered to any other host. Pass nil when
-    /// the host doesn't do mTLS.
-    ///
-    /// `clientIntermediates` supplies the identity's INTERMEDIATE certificates
-    /// (no leaf, no root), sent with it on each challenge. Without them the
+    /// `clientCredential` is consulted ONLY for a client-certificate challenge
+    /// FROM THE PINNED HOST, never offered to any other host, and read afresh
+    /// on every challenge. Pass nil when the host doesn't do mTLS. It returns the
+    /// identity AND its intermediate chain together (`ClientTLSCredential`), so a
+    /// renewal can never pair a new leaf with an old chain. Without the chain the
     /// device sends only its leaf, and a server that doesn't already hold the
-    /// intermediate fails the handshake, which looks exactly like "no cert"
-    /// (-1005) (BOS #2509 condition 4, #2653).
+    /// intermediate fails the handshake, which looks exactly like "no cert" (-1005)
+    /// (BOS #2509 condition 4, #2653).
     ///
     /// When the app's identity CHANGES (pair, re-pair, unpair, renewal), it must
     /// `invalidateAndCancel()` this session and build a new one: TLS session
@@ -116,10 +115,12 @@ public enum TrustPinning {
         pinnedHost: String,
         anchors: [SecCertificate],
         logger: Logger,
-        clientIdentity: (@Sendable () -> SecIdentity?)? = nil,
-        clientIntermediates: (@Sendable () -> [SecCertificate])? = nil,
+        clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
         configuration: URLSessionConfiguration = .default
     ) -> URLSession {
+        if PinnedSessionDelegate.normalised(pinnedHost).isEmpty {
+            logger.critical("EMPTY pinned host: every server-trust challenge on this session will FAIL-CLOSED")
+        }
         if anchors.isEmpty {
             // A packaging defect (an anchor-integrity test should catch it in CI).
             // Log loudly; the delegate rejects the pinned host rather than falling open.
@@ -130,10 +131,26 @@ public enum TrustPinning {
         let delegate = PinnedSessionDelegate(
             pinnedHost: pinnedHost,
             anchors: anchors,
-            clientIdentity: clientIdentity,
-            clientIntermediates: clientIntermediates
+            clientCredential: clientCredential
         )
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
+}
+
+/// The client side of mTLS: an identity (leaf + its private key, e.g. Secure
+/// Enclave) and the INTERMEDIATE certificates to send with it. Supplied together
+/// by one provider so they can't drift apart across a renewal. CF handles are
+/// immutable, hence @unchecked Sendable.
+public struct ClientTLSCredential: @unchecked Sendable {
+    public let identity: SecIdentity
+    /// Intermediates only. The identity's own leaf and any self-issued (root)
+    /// certificate are dropped when the credential is presented (see
+    /// `PinnedSessionDelegate.chain(for:)`), so a sloppy provider can't send them.
+    public let intermediates: [SecCertificate]
+
+    public init(identity: SecIdentity, intermediates: [SecCertificate] = []) {
+        self.identity = identity
+        self.intermediates = intermediates
     }
 }
 
@@ -145,19 +162,16 @@ public enum TrustPinning {
 public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
     private let pinnedHost: String
     private let anchors: [SecCertificate]
-    private let clientIdentity: (@Sendable () -> SecIdentity?)?
-    private let clientIntermediates: (@Sendable () -> [SecCertificate])?
+    private let clientCredential: (@Sendable () -> ClientTLSCredential?)?
 
     public init(
         pinnedHost: String,
         anchors: [SecCertificate],
-        clientIdentity: (@Sendable () -> SecIdentity?)? = nil,
-        clientIntermediates: (@Sendable () -> [SecCertificate])? = nil
+        clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil
     ) {
         self.pinnedHost = Self.normalised(pinnedHost)
         self.anchors = anchors
-        self.clientIdentity = clientIdentity
-        self.clientIntermediates = clientIntermediates
+        self.clientCredential = clientCredential
     }
 
     /// The disposition for one challenge. Split out from the URLSession
@@ -166,6 +180,13 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         for challenge: URLAuthenticationChallenge
     ) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let space = challenge.protectionSpace
+        // A misconfigured EMPTY pinned host would match nothing and silently pin
+        // nothing. Fail closed instead: refuse every server-trust challenge.
+        if pinnedHost.isEmpty {
+            return space.authenticationMethod == NSURLAuthenticationMethodServerTrust
+                ? (.cancelAuthenticationChallenge, nil)
+                : (.performDefaultHandling, nil)
+        }
         // Anything that isn't for the pinned host gets default handling: system
         // trust, and no client identity is EVER offered to another host.
         guard Self.normalised(space.host) == pinnedHost else {
@@ -192,19 +213,19 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
             // fall back to default handling: the handshake proceeds without a
             // certificate and a client-auth server refuses it. That's the
             // correct outcome for an unpaired device.
-            guard let identity = clientIdentity?() else {
+            // Read afresh per challenge, so a renewed credential is picked up at once.
+            guard let credential = clientCredential?() else {
                 return (.performDefaultHandling, nil)
             }
+            let chain = Self.chain(for: credential)
             // `.none`: the delegate is asked on every challenge, so caching gains
             // nothing, and a cached credential could outlive an unpair (the
             // provider returning nil must mean no identity is sent).
-            // Read per challenge, like the identity, so a renewed chain is picked up.
-            let intermediates = clientIntermediates?() ?? []
             return (
                 .useCredential,
                 URLCredential(
-                    identity: identity,
-                    certificates: intermediates.isEmpty ? nil : intermediates,
+                    identity: credential.identity,
+                    certificates: chain.isEmpty ? nil : chain,
                     persistence: .none
                 )
             )
@@ -212,6 +233,28 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         default:
             return (.performDefaultHandling, nil)
         }
+    }
+
+    /// The intermediates to send: the provider's list minus the identity's own
+    /// leaf (DER-equal) and minus anything self-issued (a root). Servers expect
+    /// leaf-then-intermediates. A duplicated leaf or a root in the list is at best
+    /// noise and at worst an interop failure (reviewer, ios-core #3).
+    static func chain(for credential: ClientTLSCredential) -> [SecCertificate] {
+        var leaf: SecCertificate?
+        SecIdentityCopyCertificate(credential.identity, &leaf)
+        let leafDER = leaf.map { SecCertificateCopyData($0) as Data }
+        return credential.intermediates.filter { cert in
+            if let leafDER, SecCertificateCopyData(cert) as Data == leafDER { return false }
+            return !isSelfIssued(cert)
+        }
+    }
+
+    /// Subject == issuer (normalised): a self-issued certificate, i.e. a root.
+    static func isSelfIssued(_ cert: SecCertificate) -> Bool {
+        guard let subject = SecCertificateCopyNormalizedSubjectSequence(cert) as Data?,
+              let issuer = SecCertificateCopyNormalizedIssuerSequence(cert) as Data?
+        else { return false }
+        return subject == issuer
     }
 
     /// Exact host equality, case-insensitive, with trailing root dots ignored:

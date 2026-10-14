@@ -68,55 +68,88 @@ struct PinnedSessionDelegateTests {
         )
     }
 
-    /// CF identity handles are immutable; the box only satisfies Sendable capture.
-    private final class IdentityBox: @unchecked Sendable {
-        let identity: SecIdentity
-        init(_ identity: SecIdentity) { self.identity = identity }
-    }
-
-    private final class CertsBox: @unchecked Sendable {
-        let certs: [SecCertificate]
-        init(_ certs: [SecCertificate]) { self.certs = certs }
+    /// A provider whose answer can change between challenges (renewal / unpair).
+    private final class CredentialBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: ClientTLSCredential?
+        init(_ value: ClientTLSCredential?) { self.value = value }
+        var current: ClientTLSCredential? {
+            get { lock.withLock { value } }
+            set { lock.withLock { value = newValue } }
+        }
     }
 
     private func delegate(
-        identity: SecIdentity? = nil,
-        intermediates: [SecCertificate]? = nil,
+        credential: ClientTLSCredential? = nil,
+        box: CredentialBox? = nil,
         pinnedHost: String = "Pinned.Example.Test" // host match is case-insensitive
     ) -> PinnedSessionDelegate {
-        var provider: (@Sendable () -> SecIdentity?)?
-        if let identity {
-            let box = IdentityBox(identity)
-            provider = { box.identity }
-        }
-        var chain: (@Sendable () -> [SecCertificate])?
-        if let intermediates {
-            let box = CertsBox(intermediates)
-            chain = { box.certs }
-        }
+        let source = box ?? credential.map { CredentialBox($0) }
         return PinnedSessionDelegate(
             pinnedHost: pinnedHost,
             anchors: [Fixtures.certificate("trusted-ca")],
-            clientIdentity: provider,
-            clientIntermediates: chain
+            clientCredential: source.map { box in { box.current } }
         )
     }
 
+    private func identityLeaf(_ identity: SecIdentity) -> SecCertificate {
+        var leaf: SecCertificate?
+        SecIdentityCopyCertificate(identity, &leaf)
+        return leaf!
+    }
+
     @Test func intermediatesTravelWithTheIdentity() {
-        // Any certificate stands in for "the intermediate"; the test is that the
-        // credential CARRIES what the provider returns (#2653).
-        let intermediate = Fixtures.certificate("rogue-ca")
-        let (d, c) = delegate(identity: Fixtures.clientIdentity(), intermediates: [intermediate])
+        // pinned-leaf is issued by trusted-ca (not self-issued), so it stands in for
+        // "an intermediate"; the test is that the credential CARRIES it (#2653).
+        let intermediate = Fixtures.certificate("pinned-leaf")
+        let credential = ClientTLSCredential(identity: Fixtures.clientIdentity(), intermediates: [intermediate])
+        let (d, c) = delegate(credential: credential)
             .disposition(for: challenge(host: host, method: NSURLAuthenticationMethodClientCertificate))
         #expect(d == .useCredential)
         #expect(c?.certificates.count == 1)
         #expect((c?.certificates.first as! SecCertificate) == intermediate)
     }
 
+    @Test func chainDropsTheLeafAndRoots() {
+        // A sloppy provider: [own leaf, a self-signed root, the real intermediate].
+        let identity = Fixtures.clientIdentity()
+        let intermediate = Fixtures.certificate("pinned-leaf")
+        let credential = ClientTLSCredential(
+            identity: identity,
+            intermediates: [identityLeaf(identity), Fixtures.certificate("rogue-ca"), intermediate]
+        )
+        #expect(PinnedSessionDelegate.chain(for: credential) == [intermediate])
+        #expect(PinnedSessionDelegate.isSelfIssued(Fixtures.certificate("trusted-ca")))
+        #expect(!PinnedSessionDelegate.isSelfIssued(intermediate))
+    }
+
     @Test func noIntermediatesMeansLeafOnly() {
-        let (_, c) = delegate(identity: Fixtures.clientIdentity(), intermediates: [])
+        let (_, c) = delegate(credential: ClientTLSCredential(identity: Fixtures.clientIdentity()))
             .disposition(for: challenge(host: host, method: NSURLAuthenticationMethodClientCertificate))
         #expect(c?.certificates.isEmpty == true)
+    }
+
+    @Test func credentialIsReadOnEveryChallenge() {
+        // Kills a cache-at-init mutant: the provider's answer changes between two
+        // challenges on the SAME delegate (renewal, then unpair).
+        let box = CredentialBox(ClientTLSCredential(identity: Fixtures.clientIdentity()))
+        let d = delegate(box: box)
+        let clientChallenge = challenge(host: host, method: NSURLAuthenticationMethodClientCertificate)
+        #expect(d.disposition(for: clientChallenge).0 == .useCredential)
+        box.current = ClientTLSCredential(
+            identity: Fixtures.clientIdentity(), intermediates: [Fixtures.certificate("pinned-leaf")]
+        )
+        #expect(d.disposition(for: clientChallenge).1?.certificates.count == 1) // renewed chain seen
+        box.current = nil // unpaired
+        let (after, credential) = d.disposition(for: clientChallenge)
+        #expect(after == .performDefaultHandling && credential == nil)
+    }
+
+    @Test(arguments: ["", ".", ".."])
+    func emptyPinnedHostFailsClosed(pinned: String) {
+        let d = delegate(pinnedHost: pinned)
+        #expect(d.disposition(for: challenge(host: "anything.test", method: NSURLAuthenticationMethodServerTrust)).0
+            == .cancelAuthenticationChallenge)
     }
 
     @Test func trailingDotOnThePinnedHostSideStillPins() {
@@ -145,7 +178,7 @@ struct PinnedSessionDelegateTests {
     }
 
     @Test func clientCertForPinnedHostPresentsTheIdentity() {
-        let (d, c) = delegate(identity: Fixtures.clientIdentity())
+        let (d, c) = delegate(credential: ClientTLSCredential(identity: Fixtures.clientIdentity()))
             .disposition(for: challenge(host: host, method: NSURLAuthenticationMethodClientCertificate))
         #expect(d == .useCredential)
         #expect(c?.identity != nil)
@@ -157,7 +190,7 @@ struct PinnedSessionDelegateTests {
     /// the CHALLENGE host, fails one of these.
     @Test(arguments: ["sub.pinned.example.test", "pinned.example.test.evil.test", "xpinned.example.test"])
     func lookAlikeHostsAreNotPinnedAndGetNoIdentity(other: String) {
-        let d = delegate(identity: Fixtures.clientIdentity())
+        let d = delegate(credential: ClientTLSCredential(identity: Fixtures.clientIdentity()))
         #expect(d.disposition(for: challenge(host: other, method: NSURLAuthenticationMethodServerTrust)).0 == .performDefaultHandling)
         let (cd, cc) = d.disposition(for: challenge(host: other, method: NSURLAuthenticationMethodClientCertificate))
         #expect(cd == .performDefaultHandling && cc == nil)
@@ -172,7 +205,7 @@ struct PinnedSessionDelegateTests {
     }
 
     @Test func identityIsNeverOfferedToAnotherHost() {
-        let (d, c) = delegate(identity: Fixtures.clientIdentity())
+        let (d, c) = delegate(credential: ClientTLSCredential(identity: Fixtures.clientIdentity()))
             .disposition(for: challenge(host: "elsewhere.test", method: NSURLAuthenticationMethodClientCertificate))
         #expect(d == .performDefaultHandling && c == nil)
     }
