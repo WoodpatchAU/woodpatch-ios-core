@@ -31,7 +31,10 @@ public enum CertificateSigningRequest {
         public let pem: String
     }
 
-    /// X.520 upper bound for a commonName; `openssl req` refuses longer.
+    /// X.520 upper bound for a commonName, in Unicode CODE POINTS (not grapheme
+    /// clusters, not bytes); `openssl req` refuses longer ("string too long …
+    /// maxsize=64"). A decomposed "é" (e + U+0301) is ONE Character but TWO code
+    /// points, so `String.count` would under-count.
     public static let maxCommonNameLength = 64
 
     public enum BuildError: Error, Sendable, Equatable {
@@ -45,8 +48,8 @@ public enum CertificateSigningRequest {
     /// `commonName` nil gives an empty subject (`30 00`), which is the
     /// softphone's shape: the server assigns identity, not the CSR.
     public static func build(privateKey: SecKey, commonName: String? = nil) throws -> Built {
-        if let commonName, commonName.count > maxCommonNameLength {
-            throw BuildError.commonNameTooLong(commonName.count)
+        if let commonName, commonName.unicodeScalars.count > maxCommonNameLength {
+            throw BuildError.commonNameTooLong(commonName.unicodeScalars.count)
         }
         let subject: [UInt8]
         if let commonName {

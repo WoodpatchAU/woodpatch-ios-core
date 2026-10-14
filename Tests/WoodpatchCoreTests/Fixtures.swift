@@ -5,14 +5,10 @@ import Security
 @testable import WoodpatchCore
 
 enum Fixtures {
-    /// SwiftPM gives the test target `Bundle.module`; the hosted xcodegen run
-    /// (Tests/Host) copies Fixtures into the test bundle itself.
+    /// The hosted run (Tests/Host) copies Fixtures into the test bundle itself.
+    /// (There's no SwiftPM test target: the manifest is library-only, see Package.swift.)
     static var bundle: Bundle {
-        #if SWIFT_PACKAGE
-        .module
-        #else
         Bundle(for: BundleToken.self)
-        #endif
     }
 
     private final class BundleToken {}
