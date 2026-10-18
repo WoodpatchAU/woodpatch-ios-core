@@ -34,14 +34,14 @@ reviewer does a security pass on pinning and keychain changes.
 | `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions) | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
-| `TrustPinning.swift` | fail-closed anchor pinning + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only | decision unchanged; Logger, anchors and identity injected |
+| `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only | decision unchanged; Logger, anchors and identity injected |
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only | generic key; service id + accessibility supplied by the app |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
 
 ```bash
-MAC_HOST=<the Mac's LAN address> scripts/mac-test.sh
+MAC_HOST=<the Mac's address> MAC_USER=<its SSH user> scripts/mac-test.sh
 ```
 
 It runs on the Mac build host:

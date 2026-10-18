@@ -9,12 +9,17 @@
 #   openssl interop: `openssl req -verify` on the CSRs the suite wrote out, the
 #   software-key one (EVERY run) and the Secure-Enclave one (Apple-Silicon Simulators
 #   have a real enclave). A missing CSR is a FAILURE, not a "not verified" note.
-# Env: MAC_HOST (REQUIRED, the Mac's LAN address), SSH_KEY (default: the role key),
+# Env: MAC_HOST + MAC_USER (REQUIRED: the Mac's address and SSH user; nothing about
+#      the build host is committed), SSH_KEY (optional; default: your ssh config/agent),
 #      SIM (default "iPhone 17"), REQUIRE_ENCLAVE (default 1; 0 only for a
 #      destination known to have no enclave).
 set -euo pipefail
 MAC_HOST="${MAC_HOST:?set MAC_HOST to the Mac build host address}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/$(id -un)_ed25519}"
+MAC_USER="${MAC_USER:?set MAC_USER to the Mac build host SSH user}"
+[[ "$MAC_HOST" =~ ^[A-Za-z0-9.:-]+$ && "$MAC_USER" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || { echo "unsafe MAC_HOST or MAC_USER" >&2; exit 2; }
+ssh_opts=(-o BatchMode=yes)
+[ -n "${SSH_KEY:-}" ] && ssh_opts+=(-i "$SSH_KEY")
 SIM="${SIM:-iPhone 17}"
 REQUIRE_ENCLAVE="${REQUIRE_ENCLAVE:-1}"
 [[ "$REQUIRE_ENCLAVE" =~ ^[01]$ ]] || { echo "REQUIRE_ENCLAVE must be 0 or 1" >&2; exit 2; }
@@ -25,12 +30,12 @@ sha="$(git -C "$repo" rev-parse --short HEAD)"
 [ -n "$(git -C "$repo" status --porcelain)" ] && echo "note: uncommitted changes are NOT tested (bundle = HEAD $sha)"
 bundle="$(mktemp -d)/core-$sha.bundle"
 git -C "$repo" bundle create "$bundle" HEAD 2>/dev/null
-scp -q -o BatchMode=yes -i "$SSH_KEY" "$bundle" "claude@$MAC_HOST:/tmp/core-$sha.bundle"
+scp -q "${ssh_opts[@]}" "$bundle" "$MAC_USER@$MAC_HOST:/tmp/core-$sha.bundle"
 rm -rf "$(dirname "$bundle")"
 echo "testing WoodpatchCore @ $sha on $MAC_HOST ($SIM)…"
 
 # shellcheck disable=SC2029
-ssh -i "$SSH_KEY" -o BatchMode=yes "claude@$MAC_HOST" "set -o pipefail
+ssh "${ssh_opts[@]}" "$MAC_USER@$MAC_HOST" "set -o pipefail
   dir=~/pos/core-$sha log=~/pos/core-$sha.log res=~/pos/core-$sha.xcresult
   rm -rf \$dir \$res && git -c advice.detachedHead=false clone -q /tmp/core-$sha.bundle \$dir && rm -f /tmp/core-$sha.bundle
   marker=\$(mktemp); cd \$dir

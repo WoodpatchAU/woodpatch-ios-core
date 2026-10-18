@@ -118,20 +118,17 @@ public enum TrustPinning {
         clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
         configuration: URLSessionConfiguration = .default
     ) -> URLSession {
-        if PinnedSessionDelegate.normalised(pinnedHost).isEmpty {
-            logger.critical("EMPTY pinned host: every server-trust challenge on this session will FAIL-CLOSED")
-        }
+        // An invalid pinned host is logged (critical) by the delegate's init.
         if anchors.isEmpty {
             // A packaging defect (an anchor-integrity test should catch it in CI).
             // Log loudly; the delegate rejects the pinned host rather than falling open.
-            logger.critical(
-                "NO bundled server anchor; pinned host \(pinnedHost, privacy: .public) will FAIL-CLOSED"
-            )
+            logger.critical("NO bundled server anchor: the pinned host will FAIL-CLOSED")
         }
         let delegate = PinnedSessionDelegate(
             pinnedHost: pinnedHost,
             anchors: anchors,
-            clientCredential: clientCredential
+            clientCredential: clientCredential,
+            logger: logger
         )
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
@@ -160,18 +157,29 @@ public struct ClientTLSCredential: @unchecked Sendable {
 /// immutable, so @unchecked Sendable is safe for URLSession's off-main
 /// delegate dispatch.
 public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    private let pinnedHost: String
+    /// Normalised, or nil when the configured host isn't a valid hostname (see
+    /// `validatedPinnedHost`). Nil fails closed.
+    private let pinnedHost: String?
     private let anchors: [SecCertificate]
     private let clientCredential: (@Sendable () -> ClientTLSCredential?)?
 
+    /// `logger` receives the critical "invalid pinned host" line. It defaults to
+    /// a WoodpatchCore logger so a direct init can't skip it; apps pass their own
+    /// (via `TrustPinning.pinnedSession`) to keep their subsystem filter.
     public init(
         pinnedHost: String,
         anchors: [SecCertificate],
-        clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil
+        clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
+        logger: Logger = Logger(subsystem: "WoodpatchCore", category: "TrustPinning")
     ) {
-        self.pinnedHost = Self.normalised(pinnedHost)
+        self.pinnedHost = Self.validatedPinnedHost(pinnedHost)
         self.anchors = anchors
         self.clientCredential = clientCredential
+        super.init()
+        if self.pinnedHost == nil {
+            // Constant text: the configured value is never logged.
+            logger.critical("INVALID pinned host (not a hostname): every server-trust challenge on this session will FAIL-CLOSED")
+        }
     }
 
     /// The disposition for one challenge. Split out from the URLSession
@@ -180,9 +188,11 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         for challenge: URLAuthenticationChallenge
     ) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let space = challenge.protectionSpace
-        // A misconfigured EMPTY pinned host would match nothing and silently pin
-        // nothing. Fail closed instead: refuse every server-trust challenge.
-        if pinnedHost.isEmpty {
+        // A misconfigured pinned host ("", "https://host", "host:443", a stray
+        // space) would match no real host, so the real one would silently get
+        // SYSTEM trust. Fail closed instead: refuse every server-trust challenge,
+        // and never offer the identity to anyone.
+        guard let pinnedHost else {
             return space.authenticationMethod == NSURLAuthenticationMethodServerTrust
                 ? (.cancelAuthenticationChallenge, nil)
                 : (.performDefaultHandling, nil)
@@ -239,8 +249,13 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     /// leaf (DER-equal) and minus anything self-issued (a root). Servers expect
     /// leaf-then-intermediates. A duplicated leaf or a root in the list is at best
     /// noise and at worst an interop failure (reviewer, ios-core #3).
+    ///
+    /// Only the CURRENT leaf is dropped. An older leaf left in the list after a
+    /// renewal isn't self-issued, so it would travel as an "intermediate"; the
+    /// single provider (identity and chain from one place) is what prevents that.
     static func chain(for credential: ClientTLSCredential) -> [SecCertificate] {
         var leaf: SecCertificate?
+        // If this fails, `leaf` stays nil and only the self-issued filter applies.
         SecIdentityCopyCertificate(credential.identity, &leaf)
         let leafDER = leaf.map { SecCertificateCopyData($0) as Data }
         return credential.intermediates.filter { cert in
@@ -250,6 +265,9 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     }
 
     /// Subject == issuer (normalised): a self-issued certificate, i.e. a root.
+    /// This also drops a CA key-rollover link certificate (self-issued under RFC
+    /// 5280, though signed by a different key). The Woodpatch device CA doesn't use
+    /// them; a CA that does would need its link certs supplied another way.
     static func isSelfIssued(_ cert: SecCertificate) -> Bool {
         guard let subject = SecCertificateCopyNormalizedSubjectSequence(cert) as Data?,
               let issuer = SecCertificateCopyNormalizedIssuerSequence(cert) as Data?
@@ -269,6 +287,57 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
             lower.removeLast()
         }
         return lower
+    }
+
+    /// The normalised pinned host, or nil if it isn't a DNS name or a canonical
+    /// IPv4 literal. A DNS name is dot-separated LDH labels (a-z, 0-9, '-'), each
+    /// 1-63 characters and not starting or ending with '-', at most 253 in all,
+    /// whose LAST label isn't all digits (a TLD never is, RFC 3696 §2). A name
+    /// ending in an all-digit label must be a canonical dotted quad: four decimal
+    /// octets 0-255 with no leading zeros. Otherwise "010.0.0.5", "1.1.1",
+    /// "256.1.1.1" or "2130706433" would be accepted, never equal the URL's
+    /// canonical "10.0.0.5", and leave the REAL host on system trust.
+    /// Anything else is a configuration error that would otherwise pin nothing:
+    /// a URL, a port, a path, whitespace, an empty label, non-ASCII (use the
+    /// punycode form), or an IPv6 literal (not supported).
+    static func validatedPinnedHost(_ host: String) -> String? {
+        let host = normalised(host)
+        guard !host.isEmpty, host.utf8.count <= 253 else { return nil }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        for label in labels {
+            let bytes = label.utf8
+            guard (1 ... 63).contains(bytes.count),
+                  bytes.first != UInt8(ascii: "-"), bytes.last != UInt8(ascii: "-"),
+                  bytes.allSatisfy(isLDH)
+            else { return nil }
+        }
+        if let last = labels.last, last.utf8.allSatisfy(isDigit) {
+            return isCanonicalIPv4(labels) ? host : nil
+        }
+        return host
+    }
+
+    /// Exactly four decimal octets, each 0-255, with no leading zeros.
+    private static func isCanonicalIPv4(_ labels: [Substring]) -> Bool {
+        labels.count == 4 && labels.allSatisfy { octet in
+            octet.utf8.allSatisfy(isDigit)
+                && octet.utf8.count <= 3
+                && (octet.utf8.count == 1 || octet.utf8.first != UInt8(ascii: "0"))
+                && (Int(octet).map { $0 <= 255 } ?? false)
+        }
+    }
+
+    private static func isDigit(_ byte: UInt8) -> Bool {
+        (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte)
+    }
+
+    private static func isLDH(_ byte: UInt8) -> Bool {
+        switch byte {
+        case UInt8(ascii: "a") ... UInt8(ascii: "z"), UInt8(ascii: "0") ... UInt8(ascii: "9"), UInt8(ascii: "-"):
+            true
+        default:
+            false
+        }
     }
 
     public func urlSession(
