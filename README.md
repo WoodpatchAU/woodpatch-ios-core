@@ -65,4 +65,6 @@ regenerating them would only prove the code agrees with itself.
   response, so an API client that accepts only 2xx sees it as an error. Nothing in the softphone
   relies on a followed redirect (frontend-ios, 2026-10-22). A genuinely needed cross-host fetch
   goes on a separate unpinned, ephemeral session with no client identity, explicitly.
-
+- **v1.6, `validatedPinnedHost(_:)` public.** Callers must use the RETURNED value (normalised:
+  lower case, a trailing dot stripped), e.g. to build their API base URL, never the raw input, so the
+  URL's host and the pin are the same string.
