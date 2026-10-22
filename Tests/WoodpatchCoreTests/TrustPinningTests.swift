@@ -257,7 +257,11 @@ struct PinnedSessionDelegateTests {
     }
 }
 
-/// v1.5: a pinned session never follows a redirect.
+/// v1.5: a pinned session never follows a redirect. SERIALIZED: the stub's
+/// state is process-global, so parallel cases (Swift Testing's default, the
+/// argument cases included) could answer each other's requests and pass or
+/// fail by accident (reviewer, ios-core #7).
+@Suite(.serialized)
 struct RedirectRefusalTests {
     /// Answers the first request with a 3xx to `location`; any second request
     /// (the followed redirect) is counted, which the tests require to be zero.
@@ -272,14 +276,14 @@ struct RedirectRefusalTests {
 
         override func startLoading() {
             let url = request.url!
-            let isFirst = Self.lock.withLock {
+            let (isFirst, status, location) = Self.lock.withLock {
                 Self.requests.append(url)
-                return Self.requests.count == 1
+                return (Self.requests.count == 1, Self.status, Self.location)
             }
             if isFirst {
-                let response = HTTPURLResponse(url: url, statusCode: Self.status, httpVersion: "HTTP/1.1",
-                                               headerFields: ["Location": Self.location])!
-                var next = URLRequest(url: URL(string: Self.location)!)
+                let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+                                               headerFields: ["Location": location])!
+                var next = URLRequest(url: URL(string: location)!)
                 next.httpMethod = request.httpMethod
                 client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -330,14 +334,21 @@ struct RedirectRefusalTests {
         #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
     }
 
-    @Test func theDelegateRefusesEveryRedirect() async {
-        let delegate = PinnedSessionDelegate(pinnedHost: "pinned.example.test", anchors: [])
+    /// Through the REAL session's delegate and the optional protocol
+    /// requirement, as URLSession itself calls it: dropping the
+    /// URLSessionTaskDelegate conformance makes the method unreachable and this
+    /// fails, with no network stub involved (frontend-ios's suggestion).
+    @Test func theRealSessionsDelegateRefusesEveryRedirect() async throws {
+        let session = session()
+        let delegate = try #require(session.delegate as? URLSessionTaskDelegate)
+        let redirect = try #require(delegate.urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:))
+        let task = session.dataTask(with: URL(string: "https://pinned.example.test/a")!)
         let response = HTTPURLResponse(url: URL(string: "https://pinned.example.test/a")!, statusCode: 302,
                                        httpVersion: nil, headerFields: nil)!
         let followed: URLRequest? = await withCheckedContinuation { done in
-            delegate.urlSession(URLSession.shared, task: URLSession.shared.dataTask(with: URL(string: "https://x.test")!),
-                                willPerformHTTPRedirection: response,
-                                newRequest: URLRequest(url: URL(string: "https://pinned.example.test/b")!)) { done.resume(returning: $0) }
+            redirect(session, task, response, URLRequest(url: URL(string: "https://pinned.example.test/b")!)) {
+                done.resume(returning: $0)
+            }
         }
         #expect(followed == nil)
     }
