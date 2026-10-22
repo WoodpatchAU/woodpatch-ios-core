@@ -2,6 +2,7 @@
 // per-challenge dispositions (BOS #2562; logic from the softphone's #717/#1419).
 
 import Foundation
+import os
 import Security
 import Testing
 @testable import WoodpatchCore
@@ -253,5 +254,102 @@ struct PinnedSessionDelegateTests {
         let (d, c) = delegate(credential: ClientTLSCredential(identity: Fixtures.clientIdentity()))
             .disposition(for: challenge(host: "elsewhere.test", method: NSURLAuthenticationMethodClientCertificate))
         #expect(d == .performDefaultHandling && c == nil)
+    }
+}
+
+/// v1.5: a pinned session never follows a redirect. SERIALIZED: the stub's
+/// state is process-global, so parallel cases (Swift Testing's default, the
+/// argument cases included) could answer each other's requests and pass or
+/// fail by accident (reviewer, ios-core #7).
+@Suite(.serialized)
+struct RedirectRefusalTests {
+    /// Answers the first request with a 3xx to `location`; any second request
+    /// (the followed redirect) is counted, which the tests require to be zero.
+    final class RedirectingProtocol: URLProtocol, @unchecked Sendable {
+        nonisolated(unsafe) static var status = 302
+        nonisolated(unsafe) static var location = "https://elsewhere.example.test/next"
+        nonisolated(unsafe) static var requests: [URL] = []
+        static let lock = NSLock()
+
+        override class func canInit(with _: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let url = request.url!
+            let (isFirst, status, location) = Self.lock.withLock {
+                Self.requests.append(url)
+                return (Self.requests.count == 1, Self.status, Self.location)
+            }
+            if isFirst {
+                let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+                                               headerFields: ["Location": location])!
+                var next = URLRequest(url: URL(string: location)!)
+                next.httpMethod = request.httpMethod
+                client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data())
+                client?.urlProtocolDidFinishLoading(self)
+            } else {
+                let ok = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                client?.urlProtocol(self, didReceive: ok, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data("followed".utf8))
+                client?.urlProtocolDidFinishLoading(self)
+            }
+        }
+
+        override func stopLoading() {}
+    }
+
+    private func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RedirectingProtocol.self]
+        return TrustPinning.pinnedSession(
+            pinnedHost: "pinned.example.test",
+            anchors: [Fixtures.certificate("trusted-ca")],
+            logger: Logger(subsystem: "test", category: "redirects"),
+            configuration: configuration
+        )
+    }
+
+    @Test(arguments: [301, 302, 303, 307, 308])
+    func aRedirectIsTheResponseAndNothingFollows(status: Int) async throws {
+        RedirectingProtocol.lock.withLock {
+            RedirectingProtocol.status = status
+            RedirectingProtocol.location = "https://elsewhere.example.test/next"
+            RedirectingProtocol.requests = []
+        }
+        let (_, response) = try await session().data(from: URL(string: "https://pinned.example.test/api")!)
+        #expect((response as? HTTPURLResponse)?.statusCode == status)
+        #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
+    }
+
+    @Test func aSameHostRedirectIsRefusedToo() async throws {
+        RedirectingProtocol.lock.withLock {
+            RedirectingProtocol.status = 302
+            RedirectingProtocol.location = "https://pinned.example.test/moved"
+            RedirectingProtocol.requests = []
+        }
+        let (_, response) = try await session().data(from: URL(string: "https://pinned.example.test/api")!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 302)
+        #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
+    }
+
+    /// Through the REAL session's delegate and the optional protocol
+    /// requirement, as URLSession itself calls it: dropping the
+    /// URLSessionTaskDelegate conformance makes the method unreachable and this
+    /// fails, with no network stub involved (frontend-ios's suggestion).
+    @Test func theRealSessionsDelegateRefusesEveryRedirect() async throws {
+        let session = session()
+        let delegate = try #require(session.delegate as? URLSessionTaskDelegate)
+        let redirect = try #require(delegate.urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:))
+        let task = session.dataTask(with: URL(string: "https://pinned.example.test/a")!)
+        let response = HTTPURLResponse(url: URL(string: "https://pinned.example.test/a")!, statusCode: 302,
+                                       httpVersion: nil, headerFields: nil)!
+        let followed: URLRequest? = await withCheckedContinuation { done in
+            redirect(session, task, response, URLRequest(url: URL(string: "https://pinned.example.test/b")!)) {
+                done.resume(returning: $0)
+            }
+        }
+        #expect(followed == nil)
     }
 }

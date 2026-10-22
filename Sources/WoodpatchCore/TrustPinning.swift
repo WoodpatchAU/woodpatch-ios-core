@@ -349,3 +349,35 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         completionHandler(disposition, credential)
     }
 }
+
+// v1.5 (POS #2880 design condition 4, reviewer GO 2026-10-22): a pinned
+// session NEVER follows a redirect. Its promise is "the reply came from the
+// host I pinned"; a silently followed 30x would hand back a reply from
+// wherever the redirect pointed. The 3xx comes back to the caller as the
+// response instead, and nothing is sent to the new location. Same-host
+// redirects are refused too (refuse-always). A caller that genuinely needs a
+// cross-host fetch does it explicitly on a separate, unpinned, ephemeral
+// session with no client identity.
+extension PinnedSessionDelegate: URLSessionTaskDelegate {
+    public func urlSession(
+        _: URLSession,
+        task _: URLSessionTask,
+        willPerformHTTPRedirection _: HTTPURLResponse,
+        newRequest _: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
+    /// Task-level challenges get exactly the session-level decision, so
+    /// adopting URLSessionTaskDelegate can't route a challenge around it.
+    public func urlSession(
+        _: URLSession,
+        task _: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let (disposition, credential) = disposition(for: challenge)
+        completionHandler(disposition, credential)
+    }
+}
