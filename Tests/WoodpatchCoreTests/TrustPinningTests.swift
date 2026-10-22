@@ -2,6 +2,7 @@
 // per-challenge dispositions (BOS #2562; logic from the softphone's #717/#1419).
 
 import Foundation
+import os
 import Security
 import Testing
 @testable import WoodpatchCore
