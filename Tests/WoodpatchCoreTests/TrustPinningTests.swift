@@ -255,3 +255,89 @@ struct PinnedSessionDelegateTests {
         #expect(d == .performDefaultHandling && c == nil)
     }
 }
+
+/// v1.5: a pinned session never follows a redirect.
+struct RedirectRefusalTests {
+    /// Answers the first request with a 3xx to `location`; any second request
+    /// (the followed redirect) is counted, which the tests require to be zero.
+    final class RedirectingProtocol: URLProtocol, @unchecked Sendable {
+        nonisolated(unsafe) static var status = 302
+        nonisolated(unsafe) static var location = "https://elsewhere.example.test/next"
+        nonisolated(unsafe) static var requests: [URL] = []
+        static let lock = NSLock()
+
+        override class func canInit(with _: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let url = request.url!
+            let isFirst = Self.lock.withLock {
+                Self.requests.append(url)
+                return Self.requests.count == 1
+            }
+            if isFirst {
+                let response = HTTPURLResponse(url: url, statusCode: Self.status, httpVersion: "HTTP/1.1",
+                                               headerFields: ["Location": Self.location])!
+                var next = URLRequest(url: URL(string: Self.location)!)
+                next.httpMethod = request.httpMethod
+                client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data())
+                client?.urlProtocolDidFinishLoading(self)
+            } else {
+                let ok = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                client?.urlProtocol(self, didReceive: ok, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data("followed".utf8))
+                client?.urlProtocolDidFinishLoading(self)
+            }
+        }
+
+        override func stopLoading() {}
+    }
+
+    private func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RedirectingProtocol.self]
+        return TrustPinning.pinnedSession(
+            pinnedHost: "pinned.example.test",
+            anchors: [Fixtures.certificate("trusted-ca")],
+            logger: Logger(subsystem: "test", category: "redirects"),
+            configuration: configuration
+        )
+    }
+
+    @Test(arguments: [301, 302, 303, 307, 308])
+    func aRedirectIsTheResponseAndNothingFollows(status: Int) async throws {
+        RedirectingProtocol.lock.withLock {
+            RedirectingProtocol.status = status
+            RedirectingProtocol.location = "https://elsewhere.example.test/next"
+            RedirectingProtocol.requests = []
+        }
+        let (_, response) = try await session().data(from: URL(string: "https://pinned.example.test/api")!)
+        #expect((response as? HTTPURLResponse)?.statusCode == status)
+        #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
+    }
+
+    @Test func aSameHostRedirectIsRefusedToo() async throws {
+        RedirectingProtocol.lock.withLock {
+            RedirectingProtocol.status = 302
+            RedirectingProtocol.location = "https://pinned.example.test/moved"
+            RedirectingProtocol.requests = []
+        }
+        let (_, response) = try await session().data(from: URL(string: "https://pinned.example.test/api")!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 302)
+        #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
+    }
+
+    @Test func theDelegateRefusesEveryRedirect() async {
+        let delegate = PinnedSessionDelegate(pinnedHost: "pinned.example.test", anchors: [])
+        let response = HTTPURLResponse(url: URL(string: "https://pinned.example.test/a")!, statusCode: 302,
+                                       httpVersion: nil, headerFields: nil)!
+        let followed: URLRequest? = await withCheckedContinuation { done in
+            delegate.urlSession(URLSession.shared, task: URLSession.shared.dataTask(with: URL(string: "https://x.test")!),
+                                willPerformHTTPRedirection: response,
+                                newRequest: URLRequest(url: URL(string: "https://pinned.example.test/b")!)) { done.resume(returning: $0) }
+        }
+        #expect(followed == nil)
+    }
+}
