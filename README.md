@@ -34,7 +34,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions) | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
-| `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response) | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
+| `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only | generic key; service id + accessibility supplied by the app |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 

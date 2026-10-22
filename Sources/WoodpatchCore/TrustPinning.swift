@@ -300,7 +300,11 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     /// Anything else is a configuration error that would otherwise pin nothing:
     /// a URL, a port, a path, whitespace, an empty label, non-ASCII (use the
     /// punycode form), or an IPv6 literal (not supported).
-    static func validatedPinnedHost(_ host: String) -> String? {
+    ///
+    /// Public since v1.6, so an app derives its API base URL from exactly the
+    /// host this delegate will pin, and refuses a configuration the pin would
+    /// reject up front (a config error, not "can't reach the server") (POS #25 review).
+    public static func validatedPinnedHost(_ host: String) -> String? {
         let host = normalised(host)
         guard !host.isEmpty, host.utf8.count <= 253 else { return nil }
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
