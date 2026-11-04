@@ -23,6 +23,14 @@
 // opens a public-CA MITM with nothing to catch it. Any edit to the trust logic
 // needs a pinning re-review (reviewer) AND the softphone's on-device
 // ACCEPT/REJECT self-test (APIPinDiagnostic) on the next rc.
+//
+// v1.7 (BOS #3692 B): a refused pinned trust logs WHY, as codes. A refusal
+// reached the app only as -999 (cancelled), with no reason, which cost a
+// reproduction on a Mac to diagnose (e2, 2026-11-03: Apple's NameConstraints
+// check). The delegate now logs the failed check names, read from the same
+// evaluation that made the decision (one body, `evaluateWithCodes`). The decision itself is unchanged: the
+// same `.cancel` on every rejection. Codes only: never the host, a
+// certificate field or an error's text.
 
 import Foundation
 import os
@@ -43,7 +51,17 @@ public enum TrustPinning {
     /// setter that doesn't return success, is a rejection, never a fall-through
     /// to system trust.
     public static func evaluate(serverTrust: SecTrust, anchors: [SecCertificate]) -> TrustDecision {
-        guard !anchors.isEmpty else { return .reject("no bundled anchors") }
+        evaluateWithCodes(serverTrust: serverTrust, anchors: anchors).decision
+    }
+
+    /// The decision above, and on a refusal WHY, as codes for a log line (v1.7,
+    /// BOS #3692 B). ONE body for both, so the logged reason can never come
+    /// from a different evaluation than the decision. The codes are read only
+    /// AFTER `SecTrustEvaluateWithError` has run: Security evaluates a trust
+    /// that hasn't been whenever its result is asked for, so a refusal before
+    /// evaluation says so instead of reading anything.
+    static func evaluateWithCodes(serverTrust: SecTrust, anchors: [SecCertificate]) -> (decision: TrustDecision, codes: String?) {
+        guard !anchors.isEmpty else { return (.reject("no bundled anchors"), "result=unevaluated no_anchors") }
         // Both setters are checked: if SetAnchorCertificatesOnly silently failed,
         // the system store would STILL apply and a public-CA MITM cert would pass.
         // So a non-success OSStatus fails closed rather than evaluating against a
@@ -51,13 +69,54 @@ public enum TrustPinning {
         let setAnchors = SecTrustSetAnchorCertificates(serverTrust, anchors as CFArray)
         let anchorsOnly = SecTrustSetAnchorCertificatesOnly(serverTrust, true)
         guard setAnchors == errSecSuccess, anchorsOnly == errSecSuccess else {
-            return .reject(
-                "anchor setters failed (setAnchors=\(setAnchors) anchorsOnly=\(anchorsOnly))"
+            return (
+                .reject("anchor setters failed (setAnchors=\(setAnchors) anchorsOnly=\(anchorsOnly))"),
+                "result=unevaluated anchor_setters=\(setAnchors),\(anchorsOnly)"
             )
         }
         var error: CFError?
-        if SecTrustEvaluateWithError(serverTrust, &error) { return .accept }
-        return .reject(error.map { CFErrorCopyDescription($0) as String } ?? "trust evaluation failed")
+        if SecTrustEvaluateWithError(serverTrust, &error) { return (.accept, nil) }
+        let reason = error.map { CFErrorCopyDescription($0) as String } ?? "trust evaluation failed"
+        return (.reject(reason), refusalCodes(evaluated: serverTrust, errorCode: error.map(CFErrorGetCode)))
+    }
+
+    /// Apple's trust-check names that can be logged as they are: fixed policy
+    /// check names, never data. Anything else is logged as "other".
+    static let knownChecks: Set<String> = [
+        "AnchorTrusted", "AnchorSHA1", "AnchorSHA256", "BasicConstraints", "BlackListedKey", "BlackListedLeaf",
+        "CTRequired", "ChainLength", "CriticalExtensions", "ExtendedKeyUsage", "GrayListedKey", "GrayListedLeaf",
+        "IdLinkage", "IssuerCommonName", "KeySize", "KeyUsage", "LeafSHA1", "LeafSHA256", "MissingIntermediate",
+        "NameConstraints", "NonEmptySubject", "PolicyConstraints", "Revocation", "RevocationResponseRequired",
+        "SSLHostname", "SignatureHashAlgorithms", "SystemTrustedWeakHash", "UsageConstraints", "ValidIntermediates",
+        "ValidLeaf", "ValidRoot", "ValidityPeriod", "WeakKeySize", "WeakSignature",
+    ]
+
+    /// The per-certificate failures in `SecTrustCopyResult`'s dictionary. Its
+    /// constant (kSecTrustResultDetails) is exported on macOS only, but iOS
+    /// fills the same key: the simulator test that expects `0:SSLHostname`
+    /// pins that. If it ever goes, the line reads `checks=none`; nothing is
+    /// decided from it.
+    static let resultDetailsKey = "TrustResultDetails"
+
+    /// An EVALUATED trust's refusal as codes: the trust result, the error's
+    /// code (an OSStatus), then each certificate's failed checks by its place
+    /// in the chain (0 = the leaf), e.g.
+    /// `result=5 error=-67602 checks=0:SSLHostname 1:NameConstraints`. Never
+    /// the host, a certificate field, or an error's description.
+    static func refusalCodes(evaluated serverTrust: SecTrust, errorCode: CFIndex?) -> String {
+        refusalCodes(result: SecTrustCopyResult(serverTrust) as? [String: Any], errorCode: errorCode)
+    }
+
+    /// The same from a trust result dictionary (`SecTrustCopyResult`'s shape).
+    static func refusalCodes(result: [String: Any]?, errorCode: CFIndex? = nil) -> String {
+        let value = (result?[kSecTrustResultValue as String] as? Int).map(String.init) ?? "none"
+        let error = errorCode.map { " error=\($0)" } ?? ""
+        let details = result?[resultDetailsKey] as? [[String: Any]] ?? []
+        let checks = details.enumerated().flatMap { index, failed in
+            // Sorted, so one refusal always logs the same line.
+            failed.keys.sorted().map { "\(index):\(knownChecks.contains($0) ? $0 : "other")" }
+        }
+        return "result=\(value)\(error) checks=" + (checks.isEmpty ? "none" : checks.joined(separator: " "))
     }
 
     /// Every `-----BEGIN CERTIFICATE-----` block in a PEM string, as
@@ -162,8 +221,11 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     private let pinnedHost: String?
     private let anchors: [SecCertificate]
     private let clientCredential: (@Sendable () -> ClientTLSCredential?)?
+    /// The app's logger: the invalid-host line, and each refusal's codes (v1.7).
+    private let logger: Logger
 
-    /// `logger` receives the critical "invalid pinned host" line. It defaults to
+    /// `logger` receives the critical "invalid pinned host" line, and (v1.7)
+    /// one line per refused pinned trust with its codes. It defaults to
     /// a WoodpatchCore logger so a direct init can't skip it; apps pass their own
     /// (via `TrustPinning.pinnedSession`) to keep their subsystem filter.
     public init(
@@ -175,6 +237,7 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         self.pinnedHost = Self.validatedPinnedHost(pinnedHost)
         self.anchors = anchors
         self.clientCredential = clientCredential
+        self.logger = logger
         super.init()
         if self.pinnedHost == nil {
             // Constant text: the configured value is never logged.
@@ -211,10 +274,14 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
             guard let serverTrust = space.serverTrust else {
                 return (.cancelAuthenticationChallenge, nil)
             }
-            switch TrustPinning.evaluate(serverTrust: serverTrust, anchors: anchors) {
+            // The same decision `evaluate` makes (one body); on a refusal, also why.
+            let (decision, codes) = TrustPinning.evaluateWithCodes(serverTrust: serverTrust, anchors: anchors)
+            switch decision {
             case .accept:
                 return (.useCredential, URLCredential(trust: serverTrust))
             case .reject:
+                // Already decided; this only says why (v1.7). Codes only.
+                logger.error("pinned server trust REFUSED: \(codes ?? "result=none", privacy: .public)")
                 return (.cancelAuthenticationChallenge, nil)
             }
 

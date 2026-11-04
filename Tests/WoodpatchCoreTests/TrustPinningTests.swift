@@ -31,6 +31,54 @@ struct TrustDecisionTests {
         #expect(TrustPinning.evaluate(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")]) != .accept)
     }
 
+    // MARK: Why a trust was refused (v1.7, BOS #3692 B): codes only
+
+    @Test func aWrongHostRefusalSaysSSLHostnameAndNeverTheHost() {
+        let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: "other.example.test")
+        let (decision, codes) = TrustPinning.evaluateWithCodes(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")])
+        #expect(decision != .accept)
+        let line = codes ?? ""
+        #expect(line.hasPrefix("result=") && line.contains(" error=") && line.contains("0:SSLHostname"))
+        #expect(!line.contains("example") && !line.contains("pinned"))
+    }
+
+    @Test func anotherCAsRefusalHasCodesAndNoNames() {
+        let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("rogue-leaf"), host: host)
+        let (decision, codes) = TrustPinning.evaluateWithCodes(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")])
+        #expect(decision != .accept)
+        let line = codes ?? ""
+        #expect(line.hasPrefix("result=") && !line.hasSuffix("checks=none"))
+        #expect(!line.contains("example") && !line.contains("rogue"))
+    }
+
+    /// An accepted trust has no codes, and the decision is evaluate's own.
+    @Test func anAcceptHasNoCodesAndTheSameDecision() {
+        let anchors = [Fixtures.certificate("trusted-ca")]
+        let (decision, codes) = TrustPinning.evaluateWithCodes(
+            serverTrust: Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host), anchors: anchors)
+        #expect(decision == .accept && codes == nil)
+        #expect(TrustPinning.evaluate(
+            serverTrust: Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host), anchors: anchors) == decision)
+    }
+
+    /// Refused before any evaluation: said as such, nothing read from the trust.
+    @Test func aRefusalBeforeEvaluationIsUnevaluated() {
+        let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host)
+        let (decision, codes) = TrustPinning.evaluateWithCodes(serverTrust: trust, anchors: [])
+        #expect(decision == .reject("no bundled anchors") && codes == "result=unevaluated no_anchors")
+    }
+
+    @Test func theCodesAreTheChecksByPlaceWithUnknownNamesAsOther() {
+        let result: [String: Any] = [
+            kSecTrustResultValue as String: 5,
+            TrustPinning.resultDetailsKey: [["SSLHostname": false], [:], ["NameConstraints": false, "Pinned.Example.Test": false]],
+        ]
+        #expect(TrustPinning.refusalCodes(result: result, errorCode: -67602)
+            == "result=5 error=-67602 checks=0:SSLHostname 2:NameConstraints 2:other")
+        #expect(TrustPinning.refusalCodes(result: [kSecTrustResultValue as String: 1]) == "result=1 checks=none")
+        #expect(TrustPinning.refusalCodes(result: nil) == "result=none checks=none")
+    }
+
     @Test func noAnchorsFailsClosed() {
         let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host)
         #expect(TrustPinning.evaluate(serverTrust: trust, anchors: []) == .reject("no bundled anchors"))
@@ -56,8 +104,44 @@ private final class NullSender: NSObject, URLAuthenticationChallengeSender {
     func cancel(_: URLAuthenticationChallenge) {}
 }
 
+/// A protection space that carries a server trust, as a real TLS challenge
+/// does (URLProtectionSpace's own initialiser can't set one).
+private final class TrustSpace: URLProtectionSpace, @unchecked Sendable {
+    private let trust: SecTrust
+    init(host: String, trust: SecTrust) {
+        self.trust = trust
+        super.init(host: host, port: 443, protocol: NSURLProtectionSpaceHTTPS, realm: nil,
+                   authenticationMethod: NSURLAuthenticationMethodServerTrust)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) { fatalError("unused") }
+
+    override var serverTrust: SecTrust? { trust }
+}
+
 struct PinnedSessionDelegateTests {
     let host = "pinned.example.test"
+
+    /// A server-trust challenge from `host` carrying a real chain.
+    private func trustChallenge(leaf: String, host: String) -> URLAuthenticationChallenge {
+        URLAuthenticationChallenge(
+            protectionSpace: TrustSpace(host: host, trust: Fixtures.serverTrust(leaf: Fixtures.certificate(leaf), host: host)),
+            proposedCredential: nil, previousFailureCount: 0, failureResponse: nil, error: nil, sender: NullSender()
+        )
+    }
+
+    // The gate end to end, with a real trust (v1.7 touched this branch): the
+    // anchor's chain is used, any other chain is cancelled with no credential.
+    @Test func thePinnedChainIsUsed() {
+        let (d, c) = delegate().disposition(for: trustChallenge(leaf: "pinned-leaf", host: host))
+        #expect(d == .useCredential && c != nil)
+    }
+
+    @Test func anotherCAsChainIsCancelled() {
+        let (d, c) = delegate().disposition(for: trustChallenge(leaf: "rogue-leaf", host: host))
+        #expect(d == .cancelAuthenticationChallenge && c == nil)
+    }
 
     private func challenge(host: String, method: String) -> URLAuthenticationChallenge {
         let space = URLProtectionSpace(
