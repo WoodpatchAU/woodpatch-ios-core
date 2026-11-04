@@ -71,7 +71,7 @@ regenerating them would only prove the code agrees with itself.
 - **v1.7, refusal codes.** Each refused pinned server trust now logs ONE `.error` line on the logger
   the app passes: `pinned server trust REFUSED: result=<SecTrustResultType> checks=<place>:<check> …`
   (e.g. `0:SSLHostname`, `1:NameConstraints`; an unlisted check name logs as `other`; refused before
-  any evaluation: no checks named, `checks=none`). Codes only, never the host, a certificate field or an
+  any evaluation: `result=unevaluated`, and reading the codes never evaluates). Codes only, never the host, a certificate field or an
   error's text. The decision is unchanged (the same `.cancel`), but it's the trust gate, so v1.7
   needs the reviewer's pinning re-review and the softphone's on-device ACCEPT/REJECT self-test
   (APIPinDiagnostic) on the rc that adopts it.

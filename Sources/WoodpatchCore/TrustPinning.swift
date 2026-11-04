@@ -84,12 +84,20 @@ public enum TrustPinning {
     /// its place in the chain (0 = the leaf), e.g.
     /// `result=5 checks=0:SSLHostname 1:NameConstraints`. Read from the
     /// trust's LAST evaluation; a refusal before any evaluation (no anchors,
-    /// a setter failing) names no checks (`checks=none`, or
-    /// `result=unevaluated` when there's no result at all). Never the host, a
+    /// a setter failing) reads `result=unevaluated`, and nothing is evaluated
+    /// to find out. Never the host, a
     /// certificate field, or an error's description. It reads the trust only
     /// and decides nothing.
     public static func refusalCodes(serverTrust: SecTrust) -> String {
-        refusalCodes(result: SecTrustCopyResult(serverTrust) as? [String: Any])
+        // Never evaluated (refused before evaluation): say so WITHOUT reading the
+        // result dictionary, since SecTrustCopyResult evaluates a trust that
+        // hasn't been (against the system store, as anchors were never set).
+        // This only reads: it must never cause an evaluation.
+        var result = SecTrustResultType.invalid
+        guard SecTrustGetTrustResult(serverTrust, &result) == errSecSuccess, result != .invalid else {
+            return "result=unevaluated"
+        }
+        return refusalCodes(result: SecTrustCopyResult(serverTrust) as? [String: Any])
     }
 
     /// The per-certificate failures in `SecTrustCopyResult`'s dictionary. Its
