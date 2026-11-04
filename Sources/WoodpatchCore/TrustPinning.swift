@@ -84,7 +84,8 @@ public enum TrustPinning {
     /// its place in the chain (0 = the leaf), e.g.
     /// `result=5 checks=0:SSLHostname 1:NameConstraints`. Read from the
     /// trust's LAST evaluation; a refusal before any evaluation (no anchors,
-    /// a setter failing) reads `result=unevaluated`. Never the host, a
+    /// a setter failing) names no checks (`checks=none`, or
+    /// `result=unevaluated` when there's no result at all). Never the host, a
     /// certificate field, or an error's description. It reads the trust only
     /// and decides nothing.
     public static func refusalCodes(serverTrust: SecTrust) -> String {

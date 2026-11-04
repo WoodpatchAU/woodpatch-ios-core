@@ -49,11 +49,15 @@ struct TrustDecisionTests {
         #expect(!codes.contains("example") && !codes.contains("rogue"))
     }
 
-    /// Refused before any evaluation (no anchors): nothing to read.
-    @Test func aRefusalBeforeEvaluationIsUnevaluated() {
+    /// Refused before any evaluation (no anchors): no failed checks to name,
+    /// and still nothing about the host (iOS reports a result value even for
+    /// a trust never evaluated, so the line reads `result=<n> checks=none`).
+    @Test func aRefusalBeforeEvaluationNamesNoChecks() {
         let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host)
         _ = TrustPinning.evaluate(serverTrust: trust, anchors: [])
-        #expect(TrustPinning.refusalCodes(serverTrust: trust) == "result=unevaluated")
+        let codes = TrustPinning.refusalCodes(serverTrust: trust)
+        #expect(codes.hasPrefix("result=") && (codes.hasSuffix("checks=none") || codes == "result=unevaluated"))
+        #expect(!codes.contains("example") && !codes.contains("pinned"))
     }
 
     @Test func theCodesAreTheChecksByPlaceWithUnknownNamesAsOther() {
