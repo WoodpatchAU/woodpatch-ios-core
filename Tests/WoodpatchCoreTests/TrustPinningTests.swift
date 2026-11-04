@@ -31,6 +31,42 @@ struct TrustDecisionTests {
         #expect(TrustPinning.evaluate(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")]) != .accept)
     }
 
+    // MARK: Why a trust was refused (v1.7, BOS #3692 B): codes only
+
+    @Test func aWrongHostRefusalSaysSSLHostnameAndNeverTheHost() {
+        let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: "other.example.test")
+        #expect(TrustPinning.evaluate(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")]) != .accept)
+        let codes = TrustPinning.refusalCodes(serverTrust: trust)
+        #expect(codes.hasPrefix("result=") && codes.contains("0:SSLHostname"))
+        #expect(!codes.contains("example") && !codes.contains("pinned"))
+    }
+
+    @Test func anotherCAsRefusalHasCodesAndNoNames() {
+        let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("rogue-leaf"), host: host)
+        #expect(TrustPinning.evaluate(serverTrust: trust, anchors: [Fixtures.certificate("trusted-ca")]) != .accept)
+        let codes = TrustPinning.refusalCodes(serverTrust: trust)
+        #expect(codes.hasPrefix("result=") && codes != "result=unevaluated" && !codes.hasSuffix("checks=none"))
+        #expect(!codes.contains("example") && !codes.contains("rogue"))
+    }
+
+    /// Refused before any evaluation (no anchors): nothing to read.
+    @Test func aRefusalBeforeEvaluationIsUnevaluated() {
+        let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host)
+        _ = TrustPinning.evaluate(serverTrust: trust, anchors: [])
+        #expect(TrustPinning.refusalCodes(serverTrust: trust) == "result=unevaluated")
+    }
+
+    @Test func theCodesAreTheChecksByPlaceWithUnknownNamesAsOther() {
+        let result: [String: Any] = [
+            kSecTrustResultValue as String: 5,
+            kSecTrustResultDetails as String: [["SSLHostname": false], [:], ["NameConstraints": false, "Pinned.Example.Test": false]],
+        ]
+        #expect(TrustPinning.refusalCodes(result: result) == "result=5 checks=0:SSLHostname 2:NameConstraints 2:other")
+        #expect(TrustPinning.refusalCodes(result: [kSecTrustResultValue as String: 1]) == "result=1 checks=none")
+        #expect(TrustPinning.refusalCodes(result: nil) == "result=unevaluated")
+        #expect(TrustPinning.refusalCodes(result: [:]) == "result=unevaluated")
+    }
+
     @Test func noAnchorsFailsClosed() {
         let trust = Fixtures.serverTrust(leaf: Fixtures.certificate("pinned-leaf"), host: host)
         #expect(TrustPinning.evaluate(serverTrust: trust, anchors: []) == .reject("no bundled anchors"))

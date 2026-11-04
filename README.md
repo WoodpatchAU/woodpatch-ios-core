@@ -34,7 +34,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions) | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
-| `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
+| `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes (`TrustPinning.refusalCodes`) | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only | generic key; service id + accessibility supplied by the app |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
@@ -68,3 +68,10 @@ regenerating them would only prove the code agrees with itself.
 - **v1.6, `validatedPinnedHost(_:)` public.** Callers must use the RETURNED value (normalised:
   lower case, a trailing dot stripped), e.g. to build their API base URL, never the raw input, so the
   URL's host and the pin are the same string.
+- **v1.7, refusal codes.** Each refused pinned server trust now logs ONE `.error` line on the logger
+  the app passes: `pinned server trust REFUSED: result=<SecTrustResultType> checks=<place>:<check> …`
+  (e.g. `0:SSLHostname`, `1:NameConstraints`; an unlisted check name logs as `other`; refused before
+  any evaluation: `result=unevaluated`). Codes only, never the host, a certificate field or an
+  error's text. The decision is unchanged (the same `.cancel`), but it's the trust gate, so v1.7
+  needs the reviewer's pinning re-review and the softphone's on-device ACCEPT/REJECT self-test
+  (APIPinDiagnostic) on the rc that adopts it.

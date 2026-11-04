@@ -23,6 +23,14 @@
 // opens a public-CA MITM with nothing to catch it. Any edit to the trust logic
 // needs a pinning re-review (reviewer) AND the softphone's on-device
 // ACCEPT/REJECT self-test (APIPinDiagnostic) on the next rc.
+//
+// v1.7 (BOS #3692 B): a refused pinned trust logs WHY, as codes. A refusal
+// reached the app only as -999 (cancelled), with no reason, which cost a
+// reproduction on a Mac to diagnose (e2, 2026-11-03: Apple's NameConstraints
+// check). The delegate now logs the failed check names AFTER the decision is
+// made, from the trust's own result. The decision itself is unchanged: the
+// same `.cancel` on every rejection. Codes only: never the host, a
+// certificate field or an error's text.
 
 import Foundation
 import os
@@ -58,6 +66,42 @@ public enum TrustPinning {
         var error: CFError?
         if SecTrustEvaluateWithError(serverTrust, &error) { return .accept }
         return .reject(error.map { CFErrorCopyDescription($0) as String } ?? "trust evaluation failed")
+    }
+
+    /// Apple's trust-check names that can be logged as they are: fixed policy
+    /// check names, never data. Anything else is logged as "other".
+    static let knownChecks: Set<String> = [
+        "AnchorTrusted", "AnchorSHA1", "AnchorSHA256", "BasicConstraints", "BlackListedKey", "BlackListedLeaf",
+        "CTRequired", "ChainLength", "CriticalExtensions", "ExtendedKeyUsage", "GrayListedKey", "GrayListedLeaf",
+        "IdLinkage", "IssuerCommonName", "KeySize", "KeyUsage", "LeafSHA1", "LeafSHA256", "MissingIntermediate",
+        "NameConstraints", "NonEmptySubject", "PolicyConstraints", "Revocation", "RevocationResponseRequired",
+        "SSLHostname", "SignatureHashAlgorithms", "SystemTrustedWeakHash", "UsageConstraints", "ValidIntermediates",
+        "ValidLeaf", "ValidRoot", "ValidityPeriod", "WeakKeySize", "WeakSignature",
+    ]
+
+    /// Why `serverTrust` was refused, as codes for a log line (v1.7, BOS
+    /// #3692 B): the trust result, then each certificate's failed checks by
+    /// its place in the chain (0 = the leaf), e.g.
+    /// `result=5 checks=0:SSLHostname 1:NameConstraints`. Read from the
+    /// trust's LAST evaluation; a refusal before any evaluation (no anchors,
+    /// a setter failing) reads `result=unevaluated`. Never the host, a
+    /// certificate field, or an error's description. It reads the trust only
+    /// and decides nothing.
+    public static func refusalCodes(serverTrust: SecTrust) -> String {
+        refusalCodes(result: SecTrustCopyResult(serverTrust) as? [String: Any])
+    }
+
+    /// The same from a trust result dictionary (`SecTrustCopyResult`'s shape).
+    static func refusalCodes(result: [String: Any]?) -> String {
+        guard let result, let value = result[kSecTrustResultValue as String] as? Int else {
+            return "result=unevaluated"
+        }
+        let details = result[kSecTrustResultDetails as String] as? [[String: Any]] ?? []
+        let checks = details.enumerated().flatMap { index, failed in
+            // Sorted, so one refusal always logs the same line.
+            failed.keys.sorted().map { "\(index):\(knownChecks.contains($0) ? $0 : "other")" }
+        }
+        return "result=\(value) checks=" + (checks.isEmpty ? "none" : checks.joined(separator: " "))
     }
 
     /// Every `-----BEGIN CERTIFICATE-----` block in a PEM string, as
@@ -162,8 +206,11 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     private let pinnedHost: String?
     private let anchors: [SecCertificate]
     private let clientCredential: (@Sendable () -> ClientTLSCredential?)?
+    /// The app's logger: the invalid-host line, and each refusal's codes (v1.7).
+    private let logger: Logger
 
-    /// `logger` receives the critical "invalid pinned host" line. It defaults to
+    /// `logger` receives the critical "invalid pinned host" line, and (v1.7)
+    /// one line per refused pinned trust with its codes. It defaults to
     /// a WoodpatchCore logger so a direct init can't skip it; apps pass their own
     /// (via `TrustPinning.pinnedSession`) to keep their subsystem filter.
     public init(
@@ -175,6 +222,7 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         self.pinnedHost = Self.validatedPinnedHost(pinnedHost)
         self.anchors = anchors
         self.clientCredential = clientCredential
+        self.logger = logger
         super.init()
         if self.pinnedHost == nil {
             // Constant text: the configured value is never logged.
@@ -215,6 +263,8 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
             case .accept:
                 return (.useCredential, URLCredential(trust: serverTrust))
             case .reject:
+                // Decided above; this only says why (v1.7). Codes only.
+                logger.error("pinned server trust REFUSED: \(TrustPinning.refusalCodes(serverTrust: serverTrust), privacy: .public)")
                 return (.cancelAuthenticationChallenge, nil)
             }
 
