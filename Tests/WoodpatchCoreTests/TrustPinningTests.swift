@@ -104,8 +104,44 @@ private final class NullSender: NSObject, URLAuthenticationChallengeSender {
     func cancel(_: URLAuthenticationChallenge) {}
 }
 
+/// A protection space that carries a server trust, as a real TLS challenge
+/// does (URLProtectionSpace's own initialiser can't set one).
+private final class TrustSpace: URLProtectionSpace, @unchecked Sendable {
+    private let trust: SecTrust
+    init(host: String, trust: SecTrust) {
+        self.trust = trust
+        super.init(host: host, port: 443, protocol: NSURLProtectionSpaceHTTPS, realm: nil,
+                   authenticationMethod: NSURLAuthenticationMethodServerTrust)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) { fatalError("unused") }
+
+    override var serverTrust: SecTrust? { trust }
+}
+
 struct PinnedSessionDelegateTests {
     let host = "pinned.example.test"
+
+    /// A server-trust challenge from `host` carrying a real chain.
+    private func trustChallenge(leaf: String, host: String) -> URLAuthenticationChallenge {
+        URLAuthenticationChallenge(
+            protectionSpace: TrustSpace(host: host, trust: Fixtures.serverTrust(leaf: Fixtures.certificate(leaf), host: host)),
+            proposedCredential: nil, previousFailureCount: 0, failureResponse: nil, error: nil, sender: NullSender()
+        )
+    }
+
+    // The gate end to end, with a real trust (v1.7 touched this branch): the
+    // anchor's chain is used, any other chain is cancelled with no credential.
+    @Test func thePinnedChainIsUsed() {
+        let (d, c) = delegate().disposition(for: trustChallenge(leaf: "pinned-leaf", host: host))
+        #expect(d == .useCredential && c != nil)
+    }
+
+    @Test func anotherCAsChainIsCancelled() {
+        let (d, c) = delegate().disposition(for: trustChallenge(leaf: "rogue-leaf", host: host))
+        #expect(d == .cancelAuthenticationChallenge && c == nil)
+    }
 
     private func challenge(host: String, method: String) -> URLAuthenticationChallenge {
         let space = URLProtectionSpace(
