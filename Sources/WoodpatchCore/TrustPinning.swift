@@ -91,12 +91,19 @@ public enum TrustPinning {
         refusalCodes(result: SecTrustCopyResult(serverTrust) as? [String: Any])
     }
 
+    /// The per-certificate failures in `SecTrustCopyResult`'s dictionary. Its
+    /// constant (kSecTrustResultDetails) is exported on macOS only, but iOS
+    /// fills the same key: the simulator test that expects `0:SSLHostname`
+    /// pins that. If it ever goes, the line reads `checks=none`; nothing is
+    /// decided from it.
+    static let resultDetailsKey = "TrustResultDetails"
+
     /// The same from a trust result dictionary (`SecTrustCopyResult`'s shape).
     static func refusalCodes(result: [String: Any]?) -> String {
         guard let result, let value = result[kSecTrustResultValue as String] as? Int else {
             return "result=unevaluated"
         }
-        let details = result[kSecTrustResultDetails as String] as? [[String: Any]] ?? []
+        let details = result[resultDetailsKey] as? [[String: Any]] ?? []
         let checks = details.enumerated().flatMap { index, failed in
             // Sorted, so one refusal always logs the same line.
             failed.keys.sorted().map { "\(index):\(knownChecks.contains($0) ? $0 : "other")" }

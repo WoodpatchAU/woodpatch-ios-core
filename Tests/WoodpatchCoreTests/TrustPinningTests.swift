@@ -59,7 +59,7 @@ struct TrustDecisionTests {
     @Test func theCodesAreTheChecksByPlaceWithUnknownNamesAsOther() {
         let result: [String: Any] = [
             kSecTrustResultValue as String: 5,
-            kSecTrustResultDetails as String: [["SSLHostname": false], [:], ["NameConstraints": false, "Pinned.Example.Test": false]],
+            TrustPinning.resultDetailsKey: [["SSLHostname": false], [:], ["NameConstraints": false, "Pinned.Example.Test": false]],
         ]
         #expect(TrustPinning.refusalCodes(result: result) == "result=5 checks=0:SSLHostname 2:NameConstraints 2:other")
         #expect(TrustPinning.refusalCodes(result: [kSecTrustResultValue as String: 1]) == "result=1 checks=none")
