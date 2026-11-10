@@ -91,6 +91,38 @@ struct KeychainStoreTests {
         #expect(stored == (accessibility.secAttribute as String))
     }
 
+    /// v1.8 (BOS #4160): an update moves an item written under another class
+    /// to the store's own class, both ways, and keeps the new value.
+    @Test(arguments: [
+        (KeychainAccessibility.afterFirstUnlockThisDeviceOnly, KeychainAccessibility.whenUnlockedThisDeviceOnly),
+        (KeychainAccessibility.whenUnlockedThisDeviceOnly, KeychainAccessibility.afterFirstUnlockThisDeviceOnly),
+    ])
+    func anUpdateReappliesTheStoresAccessibility(old: KeychainAccessibility, store chosen: KeychainAccessibility) throws {
+        let s = store(chosen)
+        defer { try? s.deleteAll() }
+        // An item an older build wrote under the other class.
+        let added = SecItemAdd([
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: s.service,
+            kSecAttrAccount as String: "beta", kSecValueData as String: Data("old".utf8),
+            kSecAttrAccessible as String: old.secAttribute,
+        ] as CFDictionary, nil)
+        #expect(added == errSecSuccess)
+        #expect(storedAccessibility(s, "beta") == (old.secAttribute as String))
+        try s.write(.beta, value: "new") // the update path
+        #expect(storedAccessibility(s, "beta") == (chosen.secAttribute as String))
+        #expect(try s.read(.beta) == "new")
+    }
+
+    private func storedAccessibility(_ s: KeychainStore<Key>, _ account: String) -> String? {
+        var out: AnyObject?
+        let status = SecItemCopyMatching([
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: s.service,
+            kSecAttrAccount as String: account, kSecReturnAttributes as String: true,
+        ] as CFDictionary, &out)
+        guard status == errSecSuccess else { return nil }
+        return (out as? [String: Any])?[kSecAttrAccessible as String] as? String
+    }
+
     @Test func deleteAllClearsEveryKey() throws {
         let s = store()
         try s.write(.alpha, value: "1")
