@@ -94,8 +94,13 @@ public struct KeychainStore<SecretKey>: Sendable
     }
 
     /// Upserts the value: `SecItemUpdate` first, falling back to `SecItemAdd`.
-    /// This is the recommended pattern because it preserves an existing item's
-    /// accessibility class on update.
+    /// **v1.8:** the update also sets this store's accessibility class, so an
+    /// item written earlier under another class (an older build's, say) moves
+    /// to the class the store promises. Before v1.8, an update kept the item's
+    /// old class, so a store could hold a value less protected than it said
+    /// (BOS #4160, from the full review #4141). An app that changes a store's
+    /// class should know that the next write moves the item: an item that a
+    /// background wake must read stays `afterFirstUnlockThisDeviceOnly`.
     public func write(_ key: SecretKey, value: String) throws {
         let data = Data(value.utf8)
 
@@ -107,7 +112,7 @@ public struct KeychainStore<SecretKey>: Sendable
 
         let updateStatus = SecItemUpdate(
             baseQuery as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
+            [kSecValueData as String: data, kSecAttrAccessible as String: accessibility.secAttribute] as CFDictionary
         )
         if updateStatus == errSecSuccess {
             return

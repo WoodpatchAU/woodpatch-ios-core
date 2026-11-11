@@ -35,7 +35,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
 | `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
-| `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only | generic key; service id + accessibility supplied by the app |
+| `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only. **v1.8:** an update re-applies the store's class | generic key; service id + accessibility supplied by the app |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -78,3 +78,11 @@ regenerating them would only prove the code agrees with itself.
   `.cancel`), but it's the trust gate, so v1.7 needs the reviewer's pinning re-review and the
   softphone's on-device ACCEPT/REJECT self-test
   (APIPinDiagnostic) on the rc that adopts it.
+- **v1.8, keychain accessibility on update.** `KeychainStore.write` now sets the store's
+  accessibility class on the UPDATE path too (BOS #4160). Before, an update kept the item's old
+  class, so an item written under a weaker class by an older build stayed weaker than the store
+  promised. On adopting v1.8, an app's existing items move to their store's class on their next
+  write. That's a no-op wherever a store's class never changed (the POS app's two stores never
+  have). An item that a background wake must read (a VoIP push, say) must stay
+  `afterFirstUnlockThisDeviceOnly`: moving it to `whenUnlocked` would make it unreadable while the
+  device is locked. No public API changes.
