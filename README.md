@@ -36,6 +36,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
 | `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only. **v1.8:** an update re-applies the store's class | generic key; service id + accessibility supplied by the app |
+| `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one) | from the POS app (#3920), unchanged but for the app-supplied content |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -86,3 +87,11 @@ regenerating them would only prove the code agrees with itself.
   have). An item that a background wake must read (a VoIP push, say) must stay
   `afterFirstUnlockThisDeviceOnly`: moving it to `whenUnlocked` would make it unreadable while the
   device is locked. No public API changes.
+- **v1.9, `PrivacyCover`** (BOS #4160 item 4). The POS app's App Switcher cover (#3920), made
+  shared so the softphone can adopt it. Call `PrivacyCover.shared.start { … }` once at launch with
+  the cover's content. Each scene gets its own window at `.alert + 1`, made hidden as the scene
+  connects, with an opaque `systemBackground` so the first frame is covered before SwiftUI draws.
+  It's shown on `UIScene.willDeactivateNotification` (posted synchronously, before iOS takes the
+  snapshot) and hidden on `didActivateNotification`. It takes touches while shown, never key focus.
+  It also covers while a system sheet is up (CallKit, Apple Pay, Tap to Pay), so check what users
+  see then. New public API only; nothing existing changes.
