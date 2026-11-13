@@ -36,7 +36,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
 | `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only. **v1.8:** an update re-applies the store's class | generic key; service id + accessibility supplied by the app |
-| `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one) | from the POS app (#3920), unchanged but for the app-supplied content |
+| `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one). **v1.10:** it puts the keyboard away as it shows | from the POS app (#3920), unchanged but for the app-supplied content |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -95,3 +95,11 @@ regenerating them would only prove the code agrees with itself.
   snapshot) and hidden on `didActivateNotification`. It takes touches while shown, never key focus.
   It also covers while a system sheet is up (CallKit, Apple Pay, Tap to Pay), so check what users
   see then. New public API only; nothing existing changes.
+- **v1.10, the keyboard under `PrivacyCover`** (BOS #4160, Chris's App Switcher screenshot from
+  the till). The system keyboard's window is drawn above any window an app makes, so a keyboard
+  left up showed over the cover, with a suggestion bar that can show what was typed. Raising the
+  cover's level doesn't fix it (tried at 10,000,001, iPhone and iPad). As the cover shows, editing
+  now ends in the scene's other windows, without animation, so the keyboard is gone before the
+  snapshot. **Behaviour change:** whenever the scene goes inactive (the App Switcher, Control
+  Centre, a system alert, a full-screen call), a focused field loses focus and doesn't get it back
+  when the scene returns; the user taps it again. No API changes.

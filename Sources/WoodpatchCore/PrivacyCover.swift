@@ -1,4 +1,5 @@
-// PrivacyCover.swift (v1.9, BOS #4160 item 4, from the POS app's #3920)
+// PrivacyCover.swift (v1.9, BOS #4160 item 4, from the POS app's #3920;
+// v1.10 puts the keyboard away)
 // ────────────────────────────────────────────────────────────────────
 // Hides the app whenever a scene stops being active, so the App Switcher
 // snapshot never shows what was on screen (a cart, an amount, a caller, a
@@ -17,8 +18,17 @@
 // first frame, before SwiftUI has drawn the app's cover content (reviewer, POS
 // #86 S1).
 //
-// Not key, never focused: it moves no keyboard. But it DOES take touches while
-// shown, deliberately, so nothing under it can be used.
+// Not key, never focused. But it DOES take touches while shown, deliberately,
+// so nothing under it can be used.
+//
+// THE KEYBOARD (v1.10, Chris's App Switcher screenshot on the till,
+// 2026-11-13): the system keyboard's window sits above any window an app can
+// make, so a keyboard left up was drawn over the cover, with its suggestion
+// bar able to show what was typed. Raising the cover's level doesn't help
+// (tried at 10,000,001 on iPhone and iPad: the keyboard still shows). So as the
+// cover goes up, editing ends in the scene's other windows, without animation,
+// so the keyboard is gone before the snapshot. The field doesn't get its
+// focus back when the scene returns: the user taps it again.
 //
 // It also shows under a system prompt over the app (a permission alert, a call
 // taken full screen), until the prompt is dismissed. That's the safe side, but
@@ -50,12 +60,22 @@ public final class PrivacyCover {
         content = { AnyView(cover()) }
         observers = [
             Self.observe(UIScene.willConnectNotification) { _ = $0.window(for: $1) },
-            Self.observe(UIScene.willDeactivateNotification) { $0.window(for: $1)?.isHidden = false },
+            Self.observe(UIScene.willDeactivateNotification) { $0.cover($1) },
             Self.observe(UIScene.didActivateNotification) { $0.window(for: $1)?.isHidden = true },
             Self.observe(UIScene.didDisconnectNotification) { $0.windows[$1] = nil },
         ]
         // A scene that connected before this ran.
         for scene in UIApplication.shared.connectedScenes { _ = window(for: ObjectIdentifier(scene)) }
+    }
+
+    /// Shows the scene's cover and puts the keyboard away under it.
+    private func cover(_ id: ObjectIdentifier) {
+        guard let window = window(for: id) else { return }
+        window.isHidden = false
+        guard let scene = window.windowScene else { return }
+        UIView.performWithoutAnimation {
+            for other in scene.windows where other !== window { other.endEditing(true) }
+        }
     }
 
     /// The scene's cover if it's made yet, without making it. For tests.
