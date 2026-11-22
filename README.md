@@ -37,6 +37,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only. **v1.8:** an update re-applies the store's class | generic key; service id + accessibility supplied by the app |
 | `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one). **v1.10:** it puts the keyboard away as it shows | from the POS app (#3920), unchanged but for the app-supplied content |
+| `BrandTheme.swift` | **v1.11:** the SHAPE of an app's brand colours: `BrandColor(hex:)` accepts strictly `#RRGGBB`; `BrandTheme` reads Info.plist `WPBrandPrimary` / `WPBrandPrimaryDark` (absent or invalid primary → the neutral fallback, logged once without echoing the value; dark absent or invalid → the primary); on-primary text is black or white by WCAG contrast (always ≥ 4.5:1); light/dark-resolving `UIColor` and `Color` | new (BOS #5183); NO tenant values: each app's tenant file supplies them |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -103,3 +104,11 @@ regenerating them would only prove the code agrees with itself.
   snapshot. **Behaviour change:** whenever the scene goes inactive (the App Switcher, Control
   Centre, a system alert, a full-screen call), a focused field loses focus and doesn't get it back
   when the scene returns; the user taps it again. No API changes.
+- **v1.11, `BrandTheme`** (BOS #5183, agreed by frontend-pos, frontend-ios and the reviewer for
+  #5170 and #4219). New public API only; nothing existing changes. An app opts in by setting
+  `WPBrandPrimary` (and optionally `WPBrandPrimaryDark`) in Info.plist from its gitignored tenant
+  xcconfig (`WP_BRAND_PRIMARY` / `WP_BRAND_PRIMARY_DARK`), then reading `BrandTheme.fromMainBundle(log:)`.
+  The tenant values never live here or in either app's repo. A later runtime override (BOS
+  settings) must be parsed with `BrandColor(hex:)` too, so it gets the same strict check. The
+  AccentColor colorset and the app icon stay build-time, rendered by each app's tenant script,
+  because iOS reads them before launch.
