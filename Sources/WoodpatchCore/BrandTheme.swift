@@ -121,8 +121,10 @@ public struct BrandTheme: Equatable, Sendable {
     /// Reads the two keys from an Info.plist dictionary.
     /// - Primary absent or invalid: the whole neutral fallback.
     /// - Dark absent: the primary is used in dark mode too. Dark invalid: likewise.
-    /// Each problem is reported once through `log`, with the key named and the offending
-    /// value left out: a log line never repeats an unvalidated config string.
+    /// Each problem is reported through `log` once PER CONSTRUCTION, with the key named and
+    /// the offending value left out: a log line never repeats an unvalidated config string.
+    /// Build the theme once (at launch, e.g. with `fromMainBundle`) and keep it, so a bad
+    /// value is logged once per launch, not once per screen.
     public init(infoDictionary: [String: Any]?, log: (String) -> Void = { _ in }) {
         let rawPrimary = infoDictionary?[Self.primaryKey]
         guard let primaryText = rawPrimary as? String, let primary = BrandColor(hex: primaryText) else {
