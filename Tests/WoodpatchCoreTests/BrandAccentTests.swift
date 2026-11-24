@@ -184,13 +184,13 @@ private func colour(_ hex: String) -> BrandColor { BrandColor(hex: hex)! }
         #expect(file.vectors.count >= 216, "the 6×6×6 cube at least")
         let s = file.surfaces
         let a = file.fillAlpha
-        let min = BrandAccent.minimumContrast, max = BrandAccent.increasedContrast
+        let normal = BrandAccent.minimumContrast, raised = BrandAccent.increasedContrast
         let cases: [(KeyPath<VectorFile.Vector, String>, String, Double, Double)] = [
-            (\.dark, s.dark, min, 0), (\.darkHigh, s.darkHigh, max, 0),
-            (\.light, s.light, min, 0), (\.lightHigh, s.lightHigh, max, 0),
-            (\.borderedDark, s.dark, min, a.dark), (\.borderedDarkHigh, s.darkHigh, max, a.dark),
-            (\.borderedLight, s.light, min, a.light),
-            (\.borderedLightHigh, s.lightHigh, max, a.light),
+            (\.dark, s.dark, normal, 0), (\.darkHigh, s.darkHigh, raised, 0),
+            (\.light, s.light, normal, 0), (\.lightHigh, s.lightHigh, raised, 0),
+            (\.borderedDark, s.dark, normal, a.dark), (\.borderedDarkHigh, s.darkHigh, raised, a.dark),
+            (\.borderedLight, s.light, normal, a.light),
+            (\.borderedLightHigh, s.lightHigh, raised, a.light),
         ]
         for vector in file.vectors {
             for (expected, surface, target, alpha) in cases {
