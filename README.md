@@ -38,6 +38,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `KeychainStore.swift` | `KeychainStore<Key>`, `ThisDeviceOnly` classes only. **v1.8:** an update re-applies the store's class | generic key; service id + accessibility supplied by the app |
 | `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one). **v1.10:** it puts the keyboard away as it shows | from the POS app (#3920), unchanged but for the app-supplied content |
 | `BrandTheme.swift` | **v1.11:** the SHAPE of an app's brand colours: `BrandColor(hex:)` accepts strictly `#RRGGBB`; `BrandTheme` reads Info.plist `WPBrandPrimary` / `WPBrandPrimaryDark` (absent or invalid primary → the neutral fallback, logged once without echoing the value; dark absent or invalid → the primary); on-primary text is black or white by WCAG contrast (always ≥ 4.5:1); light/dark-resolving `UIColor` and `Color` | new (BOS #5183); NO tenant values: each app's tenant file supplies them |
+| `BrandAccent.swift` | **v1.12:** the brand colour as a FOREGROUND (BOS #5406, Chris's option 1): `BrandAccent.readable(_:on:target:fillAlpha:)` moves only the OKLab lightness (hue and chroma held, chroma clamped to sRGB) by a 40-step bisection, just far enough for 4.5:1 on the HARDEST of the system's 12 surfaces (6 backgrounds × base/elevated, resolved through UITraitCollection), 7:1 on Increase Contrast's; a colour that already reads is unchanged. `BrandTheme.accent(dark:high:)`, `accentUIColor`, `accentColor`. Rule: a FILL (something sits on it) keeps `primary`/`primaryDark`; anything drawn ON the app's surface uses the accent. Both apps assert one vector file | from the till (pos-app #150), byte for byte |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -112,3 +113,13 @@ regenerating them would only prove the code agrees with itself.
   settings) must be parsed with `BrandColor(hex:)` too, so it gets the same strict check. The
   AccentColor colorset and the app icon stay build-time, rendered by each app's tenant script,
   because iOS reads them before launch.
+- **v1.12, `BrandAccent`** (BOS #5406; Chris's option 1 on the reviewer's contrast finding; the
+  reviewer's GO on the outline). New public API only; nothing existing changes. In dark mode the
+  tenant's dark value fails as text on dark surfaces (2.2–3.3:1), so a FOREGROUND (the app-wide
+  tint, text, symbols, links, outlines, focus rings, status dots) uses `BrandTheme.accentUIColor`,
+  and a FILL (text or a glyph on the brand colour) keeps `primary`/`primaryDark` with `onPrimary`.
+  Light mode derives too, as the till does: a brand that already reads is unchanged. Ported byte for
+  byte from the till's `BrandAccent`; `Tests/WoodpatchCoreTests/Fixtures/brand-accent-vectors-v1.json`
+  is asserted by both apps' suites, so a change to the algorithm changes the file in the same PR.
+  The AccentColor colorset is still each app's build-time asset: anything iOS draws from it before
+  the app's runtime tint (launch screen, widgets, extensions, the Watch) is the app's to check.

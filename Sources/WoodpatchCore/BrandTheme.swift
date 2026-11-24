@@ -92,6 +92,10 @@ public struct BrandColor: Equatable, Hashable, Sendable {
 
 /// An app's brand colours, read from Info.plist. Small on purpose: primary, its dark-mode
 /// variant, and the text colour for each. More roles can be added when an app needs them.
+///
+/// `primary` / `primaryDark` are FILLS (text or a glyph sits on them, in `onPrimary`). Anything
+/// drawn ON the app's own surface (the tint, text, symbols, outlines, dots) is the ACCENT:
+/// `accentUIColor` / `accentColor` (v1.12, BrandAccent.swift, BOS #5406).
 public struct BrandTheme: Equatable, Sendable {
 
     /// The Info.plist keys both apps use. Their xcconfig maps the tenant file's
