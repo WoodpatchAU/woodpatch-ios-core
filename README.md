@@ -39,6 +39,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one). **v1.10:** it puts the keyboard away as it shows | from the POS app (#3920), unchanged but for the app-supplied content |
 | `BrandTheme.swift` | **v1.11:** the SHAPE of an app's brand colours: `BrandColor(hex:)` accepts strictly `#RRGGBB`; `BrandTheme` reads Info.plist `WPBrandPrimary` / `WPBrandPrimaryDark` (absent or invalid primary → the neutral fallback, logged once without echoing the value; dark absent or invalid → the primary); on-primary text is black or white by WCAG contrast (always ≥ 4.5:1); light/dark-resolving `UIColor` and `Color` | new (BOS #5183); NO tenant values: each app's tenant file supplies them |
 | `BrandAccent.swift` | **v1.12:** the brand colour as a FOREGROUND (BOS #5406, Chris's option 1): `BrandAccent.readable(_:on:target:fillAlpha:)` moves only the OKLab lightness (hue and chroma held, chroma clamped to sRGB) by a 40-step bisection, just far enough for 4.5:1 on the HARDEST of the system's 12 surfaces (6 backgrounds × base/elevated, resolved through UITraitCollection), 7:1 on Increase Contrast's; a colour that already reads is unchanged. `BrandTheme.accent(dark:high:)`, `accentUIColor`, `accentColor`. Rule: a FILL (something sits on it) keeps `primary`/`primaryDark`; anything drawn ON the app's surface uses the accent. Both apps assert one vector file | from the till (pos-app #150), byte for byte |
+| `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option formatters instead of one per date field (BOS #5481), the same parse semantics, pinned against the old path | from the softphone |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -123,3 +124,8 @@ regenerating them would only prove the code agrees with itself.
   is asserted by both apps' suites, so a change to the algorithm changes the file in the same PR.
   The AccentColor colorset is still each app's build-time asset: anything iOS draws from it before
   the app's runtime tint (launch screen, widgets, extensions, the Watch) is the app's to check.
+- **v1.13, `JSONCoding`** (BOS #5481, the reviewer's efficiency audit). `decoder()` built a fresh
+  `ISO8601DateFormatter` for every date field; it now shares two whose options are fixed at creation
+  (fractional, then whole), so nothing mutates a shared formatter. The same class, options and order,
+  so the parse is the same; `JSONCodingTests` pins it against the old path and under concurrency.
+  New public `JSONCoding.date(from:)` for app code that parses a BOS timestamp by hand.
