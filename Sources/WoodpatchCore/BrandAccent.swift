@@ -31,6 +31,11 @@
 // 4. Increase Contrast: 7:1, judged on the surfaces as the system draws them then (its dark
 //    backgrounds are lighter).
 //
+// Light mode (Chris's ruling, 2026-11-24, beside his dark-mode option 1 the same day): light is
+// checked too. The brand colour is darkened only if it fails 4.5:1 (7:1 under Increase Contrast)
+// on the light surfaces. A brand that already passes (the current tenant's) is unchanged; a pale
+// future tenant colour is darkened instead of being unreadable.
+//
 // No tenant values here. Floating point appears only in colour maths (display, not money).
 
 import SwiftUI
@@ -208,7 +213,7 @@ public enum BrandAccent {
 extension BrandTheme {
     /// The accent (FOREGROUND) colour for one appearance: the light primary judged on the
     /// hardest light surface, the dark primary on the hardest dark one, at 7:1 on Increase
-    /// Contrast's own surfaces when `high`. Light mode derives too, as the till does: a brand
+    /// Contrast's own surfaces when `high`. Light mode derives too (Chris, 2026-11-24): a brand
     /// that already reads at 4.5:1 on the darkest light surface comes back unchanged, and only
     /// a pale one darkens.
     public func accent(dark: Bool, high: Bool = false) -> BrandColor {

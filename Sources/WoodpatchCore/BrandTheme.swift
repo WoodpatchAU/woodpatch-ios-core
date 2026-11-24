@@ -96,6 +96,10 @@ public struct BrandColor: Equatable, Hashable, Sendable {
 /// `primary` / `primaryDark` are FILLS (text or a glyph sits on them, in `onPrimary`). Anything
 /// drawn ON the app's own surface (the tint, text, symbols, outlines, dots) is the ACCENT:
 /// `accentUIColor` / `accentColor` (v1.12, BrandAccent.swift, BOS #5406).
+/// Chris's rulings, 2026-11-24: in DARK mode the tenant's dark value is a fill only, and
+/// foregrounds use a lighter shade derived from it (option 1). In LIGHT mode the brand is checked
+/// too, and darkened only if it fails 4.5:1 (7:1 under Increase Contrast) on the light surfaces,
+/// so the current brand is unchanged and a pale one stays readable.
 public struct BrandTheme: Equatable, Sendable {
 
     /// The Info.plist keys both apps use. Their xcconfig maps the tenant file's

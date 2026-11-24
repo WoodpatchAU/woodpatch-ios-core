@@ -146,9 +146,17 @@ private func colour(_ hex: String) -> BrandColor { BrandColor(hex: hex)! }
 
     private struct VectorFile: Decodable {
         struct Surfaces: Decodable { let dark, darkHigh, light, lightHigh: String }
-        struct Vector: Decodable { let input, dark, darkHigh, light, lightHigh: String }
+        struct FillAlpha: Decodable { let dark, light: Double }
+        struct Vector: Decodable {
+            let input, dark, darkHigh, light, lightHigh: String
+            // A bordered button's label on its own translucent fill (fillAlpha), the till's
+            // borderedTint: 4.5:1 normally, 7:1 on Increase Contrast's surfaces.
+            let borderedDark, borderedDarkHigh, borderedLight, borderedLightHigh: String
+        }
         let version: Int
+        let generator: String
         let surfaces: Surfaces
+        let fillAlpha: FillAlpha
         let vectors: [Vector]
     }
 
@@ -162,6 +170,7 @@ private func colour(_ hex: String) -> BrandColor { BrandColor(hex: hex)! }
     @Test func theVectorFilesSurfacesAreTheSystemsOwn() throws {
         let file = try vectorFile()
         #expect(file.version == 1)
+        #expect(file.generator.hasPrefix("pos-app "), "generated from the till's code, at a commit")
         #expect(BrandAccent.hardest(dark: true).hex == file.surfaces.dark)
         #expect(BrandAccent.hardest(dark: true, high: true).hex == file.surfaces.darkHigh)
         #expect(BrandAccent.hardest(dark: false).hex == file.surfaces.light)
@@ -174,18 +183,21 @@ private func colour(_ hex: String) -> BrandColor { BrandColor(hex: hex)! }
         let file = try vectorFile()
         #expect(file.vectors.count >= 216, "the 6×6×6 cube at least")
         let s = file.surfaces
-        let cases: [(KeyPath<VectorFile.Vector, String>, String, Double)] = [
-            (\.dark, s.dark, BrandAccent.minimumContrast),
-            (\.darkHigh, s.darkHigh, BrandAccent.increasedContrast),
-            (\.light, s.light, BrandAccent.minimumContrast),
-            (\.lightHigh, s.lightHigh, BrandAccent.increasedContrast),
+        let a = file.fillAlpha
+        let min = BrandAccent.minimumContrast, max = BrandAccent.increasedContrast
+        let cases: [(KeyPath<VectorFile.Vector, String>, String, Double, Double)] = [
+            (\.dark, s.dark, min, 0), (\.darkHigh, s.darkHigh, max, 0),
+            (\.light, s.light, min, 0), (\.lightHigh, s.lightHigh, max, 0),
+            (\.borderedDark, s.dark, min, a.dark), (\.borderedDarkHigh, s.darkHigh, max, a.dark),
+            (\.borderedLight, s.light, min, a.light),
+            (\.borderedLightHigh, s.lightHigh, max, a.light),
         ]
         for vector in file.vectors {
-            for (expected, surface, target) in cases {
+            for (expected, surface, target, alpha) in cases {
                 let got = BrandAccent.readable(colour(vector.input), on: colour(surface),
-                                               target: target)
+                                               target: target, fillAlpha: alpha)
                 #expect(got.hex == vector[keyPath: expected],
-                        "\(vector.input) on \(surface) at \(target)")
+                        "\(vector.input) on \(surface) at \(target), fill \(alpha)")
             }
         }
     }
