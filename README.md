@@ -31,7 +31,7 @@ reviewer does a security pass on pinning and keychain changes.
 | File | What | From the softphone |
 |---|---|---|
 | `Transport.swift` | one-method `URLSession` seam | unchanged |
-| `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions) | unchanged |
+| `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option date formatters instead of one per date field (BOS #5481); the same parse, pinned against the old path; public `date(from:)` | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
 | `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
@@ -39,7 +39,6 @@ reviewer does a security pass on pinning and keychain changes.
 | `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one). **v1.10:** it puts the keyboard away as it shows | from the POS app (#3920), unchanged but for the app-supplied content |
 | `BrandTheme.swift` | **v1.11:** the SHAPE of an app's brand colours: `BrandColor(hex:)` accepts strictly `#RRGGBB`; `BrandTheme` reads Info.plist `WPBrandPrimary` / `WPBrandPrimaryDark` (absent or invalid primary → the neutral fallback, logged once without echoing the value; dark absent or invalid → the primary); on-primary text is black or white by WCAG contrast (always ≥ 4.5:1); light/dark-resolving `UIColor` and `Color` | new (BOS #5183); NO tenant values: each app's tenant file supplies them |
 | `BrandAccent.swift` | **v1.12:** the brand colour as a FOREGROUND (BOS #5406, Chris's option 1): `BrandAccent.readable(_:on:target:fillAlpha:)` moves only the OKLab lightness (hue and chroma held, chroma clamped to sRGB) by a 40-step bisection, just far enough for 4.5:1 on the HARDEST of the system's 12 surfaces (6 backgrounds × base/elevated, resolved through UITraitCollection), 7:1 on Increase Contrast's; a colour that already reads is unchanged. `BrandTheme.accent(dark:high:)`, `accentUIColor`, `accentColor`. Rule: a FILL (something sits on it) keeps `primary`/`primaryDark`; anything drawn ON the app's surface uses the accent. Both apps assert one vector file | from the till (pos-app #150), byte for byte |
-| `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option formatters instead of one per date field (BOS #5481), the same parse semantics, pinned against the old path | from the softphone |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
