@@ -224,8 +224,12 @@ extension BrandTheme {
         )
     }
 
-    /// The accent as a UIColor that resolves per trait (style × Increase Contrast). The four
-    /// values are worked out once, when this is read: build it once per launch and keep it.
+    /// The accent as a UIColor that resolves per trait (style × Increase Contrast).
+    ///
+    /// **STORE IT: read this once per launch (e.g. a `static let`) and keep the result.** Every
+    /// read reruns four bisections against the system surfaces, so reading it, or `accentColor`,
+    /// from a SwiftUI `body` would recompute it on every render. The till and the softphone
+    /// each hold it in one static.
     public var accentUIColor: UIColor {
         let light = accent(dark: false).uiColor, dark = accent(dark: true).uiColor
         let lightHigh = accent(dark: false, high: true).uiColor
@@ -238,6 +242,7 @@ extension BrandTheme {
         }
     }
 
-    /// SwiftUI equivalent (it follows the colour scheme and Increase Contrast).
+    /// SwiftUI equivalent (it follows the colour scheme and Increase Contrast). **Store it**, as
+    /// `accentUIColor`: each read recomputes.
     public var accentColor: Color { Color(uiColor: accentUIColor) }
 }
