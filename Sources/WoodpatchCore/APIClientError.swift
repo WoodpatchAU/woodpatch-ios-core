@@ -34,6 +34,22 @@ public enum APIClientError: Error, Sendable {
     case malformedErrorResponse(statusCode: Int, body: String)
 }
 
+extension APIClientError {
+    /// Whether `error` is a call its caller cancelled, however it surfaces:
+    /// Swift's CancellationError, URLSession's cancelled (NSURLErrorDomain -999,
+    /// as a URLError or a bare NSError), or either wrapped in `.transport`
+    /// (v1.15, BOS #5566, lifted from the till's POSAPIClient). A cancellation
+    /// is the caller's own doing (a view went away), so it's never reported as a
+    /// failure. Only NSURLErrorDomain's -999 counts: another domain's -999 is
+    /// someone else's code.
+    public static func isCancellation(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        if case let APIClientError.transport(underlying) = error { return isCancellation(underlying) }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+    }
+}
+
 /// A structured error returned by the backend.
 public struct APIError: Error, Sendable, Equatable {
     public let statusCode: Int

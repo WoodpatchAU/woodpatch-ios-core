@@ -247,6 +247,12 @@ struct PinnedSessionDelegateTests {
         // Non-canonical IPv4 (reviewer, ios-core #6): none equals the URL's canonical form.
         "010.1.1.1", "1.1.1", "0x7f.0.0.1", "256.1.1.1", "1", "2130706433",
         "1.2.3.4.5", "1.2.3.00", "pinned.example.123",
+        // v1.15 (#5566, the reviewer's decision): a single label is never a pinned
+        // host, in any case or with a root dot; every inet_aton alias is refused;
+        // and an IP doesn't pin without allowIP, canonical or not.
+        "localhost", "localhost.", "LOCALHOST", "pinned",
+        "127.1", "0177.0.0.1", "127.000.0.1", "0x7f.0x1", "0x7f.0x0.0x0.0x1",
+        "127.0.0.1", "10.0.0.5",
     ]
 
     @Test(arguments: invalidPinnedHosts)
@@ -273,13 +279,51 @@ struct PinnedSessionDelegateTests {
     }
 
     @Test(arguments: [
-        "pinned.example.test", "Pinned.Example.Test.", "localhost", "127.0.0.1", "xn--pinnd-fsa.example.test",
-        "10.0.0.5", "0.0.0.0", "255.255.255.255", "123.example.test", "3com.example.test",
+        "pinned.example.test", "Pinned.Example.Test.", "xn--pinnd-fsa.example.test",
+        "123.example.test", "3com.example.test",
         String(repeating: "a", count: 63) + ".test",
         [63, 63, 63, 61].map { String(repeating: "a", count: $0) }.joined(separator: "."), // 253
     ])
     func validPinnedHostsAreKept(pinned: String) {
         #expect(PinnedSessionDelegate.validatedPinnedHost(pinned) == pinned.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")))
+    }
+
+    /// v1.15: an IP pins only when the caller asks (a dev server), and only in
+    /// canonical form. One rule for the root dot: it's dropped before the check,
+    /// as for a name, so "10.0.0.5." pins "10.0.0.5".
+    @Test(arguments: ["127.0.0.1", "10.0.0.5", "10.0.0.5.", "0.0.0.0", "255.255.255.255"])
+    func aCanonicalIPPinsOnlyWithAllowIP(pinned: String) {
+        let canonical = pinned.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        #expect(PinnedSessionDelegate.validatedPinnedHost(pinned, allowIP: true) == canonical)
+        #expect(PinnedSessionDelegate.validatedPinnedHost(pinned) == nil, "an IP pinned by default")
+    }
+
+    /// Even with allowIP, no inet_aton alias pins: each reads as some address to
+    /// a resolver but never equals the URL's canonical host.
+    @Test(arguments: ["127.1", "0177.0.0.1", "127.000.0.1", "010.0.0.1", "0x7f.0.0.1", "0x7f.0x1",
+                      "2130706433", "256.1.1.1", "1.2.3", "::1", "[::1]"])
+    func noIPAliasPinsEvenWithAllowIP(pinned: String) {
+        #expect(PinnedSessionDelegate.validatedPinnedHost(pinned, allowIP: true) == nil)
+    }
+
+    /// v1.15 (#5566): pinnedSession's default configuration keeps nothing, so a
+    /// caller that forgets to pass one gets no cache, cookies or credential store.
+    @Test func thePinnedSessionsDefaultConfigurationKeepsNothing() {
+        let session = TrustPinning.pinnedSession(pinnedHost: "pinned.example.test", anchors: [Fixtures.certificate("trusted-ca")],
+                                                 logger: Logger(subsystem: "test", category: "pinning"))
+        defer { session.invalidateAndCancel() }
+        let configuration = session.configuration
+        #expect(configuration.urlCache == nil)
+        #expect(configuration.urlCredentialStorage == nil)
+        #expect(configuration.httpCookieStorage == nil && !configuration.httpShouldSetCookies)
+        #expect(configuration.requestCachePolicy == .reloadIgnoringLocalCacheData)
+        #expect(session.delegate is PinnedSessionDelegate)
+    }
+
+    @Test func ephemeralConfigurationIsFreshEachCall() {
+        let first = TrustPinning.ephemeralConfiguration()
+        first.timeoutIntervalForResource = 5
+        #expect(TrustPinning.ephemeralConfiguration().timeoutIntervalForResource != 5, "a shared value one caller could change")
     }
 
     @Test func trailingDotOnThePinnedHostSideStillPins() {

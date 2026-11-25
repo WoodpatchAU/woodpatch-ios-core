@@ -50,9 +50,11 @@ public enum JSONCoding {
             let container = try decoder.singleValueContainer()
             let raw = try container.decode(String.self)
             if let date = date(from: raw) { return date }
+            // Never the value itself (v1.15, BOS #5566): an error's description
+            // reaches logs, and the field could hold anything the server sent.
             throw DecodingError.dataCorruptedError(
                 in: container,
-                debugDescription: "Unparseable ISO 8601 timestamp: \(raw)"
+                debugDescription: "Unparseable ISO 8601 timestamp"
             )
         }
         return decoder

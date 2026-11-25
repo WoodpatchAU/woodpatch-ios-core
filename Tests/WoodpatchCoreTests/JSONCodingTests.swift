@@ -55,4 +55,26 @@ private let samples = [
         }
         #expect(results.count == 400 && results.allSatisfy { $0 })
     }
+
+    /// v1.15 (BOS #5566): an unparseable date's error never carries the value,
+    /// so a decode-failure log can't either. A sentinel no description could
+    /// contain by chance, checked in every rendering a logger might use.
+    @Test func anUnparseableDatesErrorDoesntCarryTheValue() throws {
+        struct Dated: Decodable { let at: Date }
+        let sentinel = "SENTINEL-5566-not-a-date"
+        let body = Data(#"{"at":"\#(sentinel)"}"#.utf8)
+        do {
+            _ = try JSONCoding.decoder().decode(Dated.self, from: body)
+            Issue.record("an unparseable date decoded")
+        } catch {
+            for text in [String(describing: error), String(reflecting: error), error.localizedDescription,
+                         "\(error as NSError)"] {
+                #expect(!text.contains(sentinel), "the wire value is in: \(text.prefix(80))")
+            }
+            guard case let DecodingError.dataCorrupted(context) = error else {
+                Issue.record("not dataCorrupted: \(type(of: error))"); return
+            }
+            #expect(context.debugDescription == "Unparseable ISO 8601 timestamp")
+        }
+    }
 }
