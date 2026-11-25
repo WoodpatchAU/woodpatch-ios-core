@@ -12,14 +12,23 @@
 // - The SOURCE size is checked from the header before anything is decoded: width × height must
 //   be real (both > 0), must not overflow, and must be within `maxSourcePixels`. A forged
 //   header claiming 100k × 100k is refused unread.
-// - Only a THUMBNAIL is ever decoded, at most `maxPixelSize` on its long side
+// - Only a THUMBNAIL is ever made, at most `maxPixelSize` on its long side
 //   (CreateThumbnailFromImageAlways, so an embedded thumbnail is never trusted; with the EXIF
 //   orientation applied; ShouldCacheImmediately, so the decode happens here, off whatever thread
-//   the caller chose, not later at draw time on main). There is no "full size": a viewer asks
-//   for its screen's long side (about 4096 px), never nil.
-// - Only the first image of the file (an animated GIF shows its first frame).
+//   the caller chose, not later at draw time on main). There's no "full size" option: a viewer
+//   asks for its screen's long side (about 4096 px), never nil. `maxPixelSize` isn't clamped
+//   above, so a huge one is, in effect, full size; it's still bounded by `maxSourcePixels`.
+// - `maxSourcePixels` is the REAL memory ceiling (the reviewer, core #16). For JPEG, ImageIO
+//   scales while it decodes; for PNG and WebP it may decode the whole source to make the
+//   thumbnail. Assume about 4 bytes per source pixel of temporary memory: the till's 40 MP is
+//   about 160 MB. Size it from your own memory budget (an MMS viewer wants far less).
+// - Only image index 0 (an animated GIF shows its first frame). For HEIC, whose primary image
+//   needn't be index 0 (CGImageSourceGetPrimaryImageIndex), that's a known gap: HEIC is in no
+//   default set, and an adopter that allows it should decide which image it wants.
+// - Bytes trickling within the cap can still hold a request open: give the session a
+//   timeoutIntervalForResource.
 //
-// ImageIO and Foundation only, no UIKit, so a watchOS target can use it too. The caller wraps
+// ImageIO and Foundation only, no UIKit (the package itself is iOS-only today). The caller wraps
 // the CGImage (UIImage(cgImage:), Image(decorative:scale:)). Pure: no state, no logging (the
 // caller logs its own event code), safe from any thread.
 //
@@ -60,7 +69,8 @@ public enum BoundedImage {
               // Exact types, never "conforms to": .image would let every parser in.
               allowedTypes.contains(type),
               CGImageSourceGetCount(source) >= 1,
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
+                  as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int,
               withinPixelBudget(width: width, height: height, maxSourcePixels: maxSourcePixels)

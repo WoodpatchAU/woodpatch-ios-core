@@ -74,6 +74,21 @@ import UniformTypeIdentifiers
         #expect(!BoundedImage.withinPixelBudget(width: 3_037_000_500, height: 3_037_000_500, maxSourcePixels: .max))
     }
 
+    /// Only the first frame of a multi-frame GIF, when GIF is allowed.
+    @Test func aMultiFrameGIFGivesItsFirstFrame() throws {
+        let gif = try #require(Pictures.animatedGIF(first: (1, 0, 0), second: (0, 0, 1)))
+        let frame = try #require(thumb(gif, types: [.gif]))
+        let (red, _, blue) = try #require(Pictures.centre(frame))
+        #expect(red > 200 && blue < 50, "the first (red) frame, not the second (blue)")
+    }
+
+    /// The EXIF orientation is applied: a 40 × 20 JPEG tagged "rotate 90" comes out 20 × 40.
+    @Test func theEXIFOrientationIsApplied() throws {
+        let jpeg = try #require(Pictures.encoded(.jpeg, width: 40, height: 20, orientation: 6))
+        let rotated = try #require(thumb(jpeg))
+        #expect(rotated.width == 20 && rotated.height == 40)
+    }
+
     /// The till's exact rules give the till's answers (it adopts this with its own constants).
     @Test func theTillsRulesAsBefore() throws {
         let png = try #require(Pictures.encoded(.png, width: 1200, height: 800))
@@ -96,24 +111,41 @@ struct ByteCappedSendTests {
     private func request(_ path: String) -> URLRequest { URLRequest(url: URL(string: "https://stub.invalid\(path)")!) }
 
     @Test func withinTheCapTheWholeBodyComesBack() async throws {
-        ChunkedStub.serve(chunks: [Data(count: 300), Data(count: 300)], announce: false)
+        ChunkedStub.serve(chunks: [Data(count: 300), Data(count: 300)], announce: nil)
         let (data, response) = try await session().send(request("/ok"), maxBytes: 600)
         #expect(data.count == 600 && (response as? HTTPURLResponse)?.statusCode == 200)
     }
 
+    /// The header alone refuses it: it announces 2,000 but sends 10, so only the
+    /// Content-Length check can (the reviewer's should-fix on core #16).
     @Test func anAnnouncedLengthOverTheCapIsRefusedBeforeTheBody() async {
-        ChunkedStub.serve(chunks: [Data(count: 2_000)], announce: true)
+        ChunkedStub.serve(chunks: [Data(count: 10)], announce: 2_000)
         await #expect(throws: ResponseTooLarge(maxBytes: 1_000)) { try await session().send(request("/big"), maxBytes: 1_000) }
+    }
+
+    /// A header that lies short (500, then 2,000 bytes) is caught by the count.
+    @Test func aHeaderThatLiesShortIsCaughtByTheCount() async {
+        ChunkedStub.serve(chunks: Array(repeating: Data(count: 400), count: 5), announce: 500)
+        await #expect(throws: ResponseTooLarge(maxBytes: 1_000)) { try await session().send(request("/lies"), maxBytes: 1_000) }
+    }
+
+    /// The boundary: exactly the cap passes; one byte more doesn't, announced or not.
+    @Test(arguments: [false, true])
+    func exactlyTheCapPassesAndOneMoreDoesnt(announced: Bool) async throws {
+        ChunkedStub.serve(chunks: [Data(count: 600), Data(count: 400)], announce: announced ? 1_000 : nil)
+        #expect(try await session().send(request("/at"), maxBytes: 1_000).0.count == 1_000)
+        ChunkedStub.serve(chunks: [Data(count: 600), Data(count: 401)], announce: announced ? 1_001 : nil)
+        await #expect(throws: ResponseTooLarge(maxBytes: 1_000)) { try await session().send(request("/over"), maxBytes: 1_000) }
     }
 
     /// No Content-Length (chunked): counted as it arrives, and refused at the byte past the cap.
     @Test func anUnannouncedBodyIsRefusedAsItPassesTheCap() async {
-        ChunkedStub.serve(chunks: Array(repeating: Data(count: 400), count: 5), announce: false)
+        ChunkedStub.serve(chunks: Array(repeating: Data(count: 400), count: 5), announce: nil)
         await #expect(throws: ResponseTooLarge(maxBytes: 1_000)) { try await session().send(request("/stream"), maxBytes: 1_000) }
     }
 
     @Test func aCapOfNothingIsRefused() async {
-        ChunkedStub.serve(chunks: [Data(count: 1)], announce: false)
+        ChunkedStub.serve(chunks: [Data(count: 1)], announce: nil)
         await #expect(throws: ResponseTooLarge(maxBytes: 0)) { try await session().send(request("/zero"), maxBytes: 0) }
     }
 
@@ -126,13 +158,14 @@ struct ByteCappedSendTests {
 
 // MARK: - Test doubles
 
-/// Serves one scripted body in chunks, with or without a Content-Length.
+/// Serves one scripted body in chunks, announcing `announce` as its Content-Length (which may
+/// lie), or none (chunked).
 final class ChunkedStub: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var chunks: [Data] = []
-    nonisolated(unsafe) private static var announce = false
+    nonisolated(unsafe) private static var announce: Int?
     private static let lock = NSLock()
 
-    static func serve(chunks: [Data], announce: Bool) {
+    static func serve(chunks: [Data], announce: Int?) {
         lock.withLock { self.chunks = chunks; self.announce = announce }
     }
 
@@ -142,7 +175,7 @@ final class ChunkedStub: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         let (chunks, announce) = Self.lock.withLock { (Self.chunks, Self.announce) }
         var headers = ["Content-Type": "application/octet-stream"]
-        if announce { headers["Content-Length"] = String(chunks.reduce(0) { $0 + $1.count }) }
+        if let announce { headers["Content-Length"] = String(announce) }
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         for chunk in chunks { client?.urlProtocol(self, didLoad: chunk) }
@@ -153,19 +186,47 @@ final class ChunkedStub: URLProtocol, @unchecked Sendable {
 }
 
 private enum Pictures {
-    /// A width × height picture in `type`, drawn and encoded with CoreGraphics and ImageIO.
-    static func encoded(_ type: UTType, width: Int, height: Int) -> Data? {
+    /// A width × height picture in `type`, drawn and encoded with CoreGraphics and ImageIO,
+    /// optionally tagged with an EXIF orientation.
+    static func encoded(_ type: UTType, width: Int, height: Int, orientation: Int? = nil) -> Data? {
+        guard let image = solid(width: width, height: height, (0.2, 0.5, 0.4)) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil) else { return nil }
+        let properties = orientation.map { [kCGImagePropertyOrientation: $0] as CFDictionary }
+        CGImageDestinationAddImage(destination, image, properties)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    static func solid(width: Int, height: Int, _ rgb: (CGFloat, CGFloat, CGFloat)) -> CGImage? {
         guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
-        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.4, alpha: 1))
+        context.setFillColor(CGColor(red: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        guard let image = context.makeImage() else { return nil }
+        return context.makeImage()
+    }
+
+    /// A two-frame 16 × 16 GIF, one solid colour per frame.
+    static func animatedGIF(first: (CGFloat, CGFloat, CGFloat), second: (CGFloat, CGFloat, CGFloat)) -> Data? {
         let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, nil)
+        guard let a = solid(width: 16, height: 16, first), let b = solid(width: 16, height: 16, second),
+              let destination = CGImageDestinationCreateWithData(data, UTType.gif.identifier as CFString, 2, nil)
+        else { return nil }
+        CGImageDestinationAddImage(destination, a, nil)
+        CGImageDestinationAddImage(destination, b, nil)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    /// The centre pixel's red, green and blue (0–255), redrawn into a known RGBA layout.
+    static func centre(_ image: CGImage) -> (Int, Int, Int)? {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.draw(image, in: CGRect(x: -image.width / 2, y: -image.height / 2, width: image.width, height: image.height))
+        return (Int(pixel[0]), Int(pixel[1]), Int(pixel[2]))
     }
 
     /// An 8 × 8 lossless WebP (made with Pillow), as bytes: the till's fixture.

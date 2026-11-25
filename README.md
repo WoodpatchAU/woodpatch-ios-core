@@ -137,4 +137,8 @@ regenerating them would only prove the code agrees with itself.
   is the point of it. A stub with its bytes in memory implements it as
   `(try ResponseTooLarge.check(data, maxBytes: maxBytes), response)`. `BoundedImage.thumbnail` takes
   every limit from the caller: allow only the types you show (each is a parser exposed to the
-  sender), and a viewer asks for its screen's long side, never full size.
+  sender), and a viewer asks for its screen's long side, never full size. **`maxSourcePixels` is
+  the real memory ceiling:** ImageIO scales a JPEG as it decodes, but may decode a whole PNG or
+  WebP source to make the thumbnail, so budget about 4 bytes per source pixel (the till's 40 MP is
+  about 160 MB of temporary memory). An MMS viewer should pick a much smaller budget. Give a
+  capped session a `timeoutIntervalForResource` too: a server can trickle bytes within the cap.
