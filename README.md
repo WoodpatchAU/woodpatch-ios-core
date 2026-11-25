@@ -30,7 +30,7 @@ reviewer does a security pass on pinning and keychain changes.
 
 | File | What | From the softphone |
 |---|---|---|
-| `Transport.swift` | one-method `URLSession` seam | unchanged |
+| `Transport.swift` | `URLSession` seam. **v1.14:** `send(_:maxBytes:)`, a REQUIRED second method: the cap holds while the bytes arrive (an announced length over it is refused before the body, a stream past it is cancelled at the byte); `ResponseTooLarge` (carries the cap only) and its `check(_:maxBytes:)` for stubs | was one method; the second has no default on purpose |
 | `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option date formatters instead of one per date field (BOS #5481); the same parse, pinned against the old path; public `date(from:)` | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
@@ -39,6 +39,7 @@ reviewer does a security pass on pinning and keychain changes.
 | `PrivacyCover.swift` | **v1.9:** the App Switcher cover: a window per scene above every sheet and alert, made ahead, hidden and opaque, shown on `willDeactivate` and hidden on `didActivate`; the cover's content is the app's (`PrivacyCoverView(label:)` is a plain one). **v1.10:** it puts the keyboard away as it shows | from the POS app (#3920), unchanged but for the app-supplied content |
 | `BrandTheme.swift` | **v1.11:** the SHAPE of an app's brand colours: `BrandColor(hex:)` accepts strictly `#RRGGBB`; `BrandTheme` reads Info.plist `WPBrandPrimary` / `WPBrandPrimaryDark` (absent or invalid primary → the neutral fallback, logged once without echoing the value; dark absent or invalid → the primary); on-primary text is black or white by WCAG contrast (always ≥ 4.5:1); light/dark-resolving `UIColor` and `Color` | new (BOS #5183); NO tenant values: each app's tenant file supplies them |
 | `BrandAccent.swift` | **v1.12:** the brand colour as a FOREGROUND (BOS #5406, Chris's option 1): `BrandAccent.readable(_:on:target:fillAlpha:)` moves only the OKLab lightness (hue and chroma held, chroma clamped to sRGB) by a 40-step bisection, just far enough for 4.5:1 on the HARDEST of the system's 12 surfaces (6 backgrounds × base/elevated, resolved through UITraitCollection), 7:1 on Increase Contrast's; a colour that already reads is unchanged. `BrandTheme.accent(dark:high:)`, `accentUIColor`, `accentColor`. Rule: a FILL (something sits on it) keeps `primary`/`primaryDark`; anything drawn ON the app's surface uses the accent. Both apps assert one vector file | from the till (pos-app #150), byte for byte |
+| `BoundedImage.swift` | **v1.14:** the one bounded decode for outside pictures: the type read from the bytes and matched EXACTLY against the caller's set, the header's width × height checked (> 0, no overflow, within `maxSourcePixels`) before any decode, then only a thumbnail at `maxPixelSize` (no full-size decode exists), first frame only. ImageIO only, no UIKit | from the till's ImageGate (pos-app #4110 A.3, #141), with the till's constants as the caller's |
 | `DER.swift`, `CertificateSigningRequest.swift` | PKCS#10 for any P-256 `SecKey` (software or Secure Enclave) | generalised from the SIP key; byte-identical output |
 
 ## Testing
@@ -128,3 +129,12 @@ regenerating them would only prove the code agrees with itself.
   (fractional, then whole), so nothing mutates a shared formatter. The same class, options and order,
   so the parse is the same; `JSONCodingTests` pins it against the old path and under concurrency.
   New public `JSONCoding.date(from:)` for app code that parses a BOS timestamp by hand.
+- **v1.14, `BoundedImage` and `send(_:maxBytes:)`** (BOS #5560, the reviewer's #5552 audit; Chris's
+  ruling 2026-11-25: the shared library first, then mobile #150 adopts it). New public API, and ONE
+  BREAKING change: `Transport` gains a second requirement, `send(_:maxBytes:)`, with no default, so
+  every conformer (each app's wrappers and test doubles) must say how it caps. A default that read
+  everything and checked afterwards would have let a wrapper silently lose the streaming cap, which
+  is the point of it. A stub with its bytes in memory implements it as
+  `(try ResponseTooLarge.check(data, maxBytes: maxBytes), response)`. `BoundedImage.thumbnail` takes
+  every limit from the caller: allow only the types you show (each is a parser exposed to the
+  sender), and a viewer asks for its screen's long side, never full size.
