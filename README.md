@@ -31,7 +31,7 @@ reviewer does a security pass on pinning and keychain changes.
 | File | What | From the softphone |
 |---|---|---|
 | `Transport.swift` | one-method `URLSession` seam | unchanged |
-| `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions) | unchanged |
+| `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option date formatters instead of one per date field (BOS #5481); the same parse, pinned against the old path; public `date(from:)` | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code) | typed code enums stay per app |
 | `TrustPinning.swift` | fail-closed anchor pinning (a pinned host that isn't a valid hostname fails closed) + an optional mTLS `ClientTLSCredential` (identity + chain), pinned host only. **v1.5:** a pinned session never follows a redirect (the 3xx is the response). **v1.6:** `PinnedSessionDelegate.validatedPinnedHost(_:)` is public. **v1.7:** a refused pinned trust logs its failed checks as codes | decision unchanged; Logger, anchors and identity injected; redirect refusal new in v1.5 |
@@ -123,3 +123,8 @@ regenerating them would only prove the code agrees with itself.
   is asserted by both apps' suites, so a change to the algorithm changes the file in the same PR.
   The AccentColor colorset is still each app's build-time asset: anything iOS draws from it before
   the app's runtime tint (launch screen, widgets, extensions, the Watch) is the app's to check.
+- **v1.13, `JSONCoding`** (BOS #5481, the reviewer's efficiency audit). `decoder()` built a fresh
+  `ISO8601DateFormatter` for every date field; it now shares two whose options are fixed at creation
+  (fractional, then whole), so nothing mutates a shared formatter. The same class, options and order,
+  so the parse is the same; `JSONCodingTests` pins it against the old path and under concurrency.
+  New public `JSONCoding.date(from:)` for app code that parses a BOS timestamp by hand.

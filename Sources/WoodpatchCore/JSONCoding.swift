@@ -9,35 +9,47 @@
 //     `2026-05-22T12:00:00+10:00`. Some servers emit fractional
 //     seconds, so the decoder tries both forms.
 //
-// `ISO8601DateFormatter` isn't `Sendable`, so no instance is shared:
-// each decode gets a fresh one. That costs microseconds and avoids a
-// class of cross-thread bugs that would surface as silent decode
-// failures.
+// v1.13 (BOS #5481, the reviewer's efficiency audit): the decoder used to build a fresh
+// `ISO8601DateFormatter` for EVERY date field, and mutate its options between the two tries.
+// Now there are two formatters, each with its options fixed at creation and never changed
+// again, shared by every decode. Apple documents the date formatters as thread-safe for
+// parsing; what wasn't safe was mutating `formatOptions` on a shared instance, and nothing
+// does that now. The parse semantics are the same by construction (the same class, the same
+// two option sets, tried in the same order). JSONCodingTests pins parity against the old
+// fresh-formatter path.
 //
-// Extracted unchanged from the softphone (Networking/JSONCoding.swift)
-// for BOS #2562.
+// Extracted from the softphone (Networking/JSONCoding.swift) for BOS #2562.
 
 import Foundation
 
 public enum JSONCoding {
+    /// Immutable after init (options set once), so sharing it is safe. `@unchecked Sendable`
+    /// because Foundation doesn't mark the class Sendable.
+    private final class Parsers: @unchecked Sendable {
+        let fractional: ISO8601DateFormatter
+        let whole: ISO8601DateFormatter
+
+        init() {
+            fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            whole = ISO8601DateFormatter()
+            whole.formatOptions = [.withInternetDateTime]
+        }
+    }
+
+    private static let parsers = Parsers()
+
+    /// A BOS ISO 8601 timestamp, with or without fractional seconds. nil = unparseable.
+    public static func date(from raw: String) -> Date? {
+        parsers.fractional.date(from: raw) ?? parsers.whole.date(from: raw)
+    }
+
     public static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let raw = try container.decode(String.self)
-
-            let formatter = ISO8601DateFormatter()
-
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = formatter.date(from: raw) {
-                return date
-            }
-
-            formatter.formatOptions = [.withInternetDateTime]
-            if let date = formatter.date(from: raw) {
-                return date
-            }
-
+            if let date = date(from: raw) { return date }
             throw DecodingError.dataCorruptedError(
                 in: container,
                 debugDescription: "Unparseable ISO 8601 timestamp: \(raw)"
