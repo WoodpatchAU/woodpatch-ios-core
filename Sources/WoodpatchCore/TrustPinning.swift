@@ -170,12 +170,23 @@ public enum TrustPinning {
     /// When the app's identity CHANGES (pair, re-pair, unpair, renewal), it must
     /// `invalidateAndCancel()` this session and build a new one: TLS session
     /// resumption can outlive what the provider closure returns.
+    ///
+    /// v1.15 (BOS #5566): `configuration` defaults to `ephemeralConfiguration()`,
+    /// not `.default`, so a caller that forgets it gets no URL cache, no cookies
+    /// and no credential store on its pinned host. A caller that needs more passes
+    /// its own (the till passes ephemeralConfiguration() plus a resource timeout).
+    ///
+    /// `allowIP` (v1.15) lets a dev server's canonical IPv4 address be the
+    /// pinned host. It goes to the delegate's `validatedPinnedHost` check, so an
+    /// app that pre-checks a host with `validatedPinnedHost(_, allowIP: true)`
+    /// gets a session that pins exactly that host, never one that refuses it.
     public static func pinnedSession(
         pinnedHost: String,
+        allowIP: Bool = false,
         anchors: [SecCertificate],
         logger: Logger,
         clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
-        configuration: URLSessionConfiguration = .default
+        configuration: URLSessionConfiguration = ephemeralConfiguration()
     ) -> URLSession {
         // An invalid pinned host is logged (critical) by the delegate's init.
         if anchors.isEmpty {
@@ -185,11 +196,26 @@ public enum TrustPinning {
         }
         let delegate = PinnedSessionDelegate(
             pinnedHost: pinnedHost,
+            allowIP: allowIP,
             anchors: anchors,
             clientCredential: clientCredential,
             logger: logger
         )
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
+
+    /// A session configuration that keeps nothing (v1.15, BOS #5566; the till's
+    /// settings since #2880): ephemeral, no URL cache, no credential storage, no
+    /// cookie storage, no cookies sent, and a cache policy that never answers from
+    /// a cache. A fresh value each call, so a caller can add to it (a timeout).
+    public static func ephemeralConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return configuration
     }
 }
 
@@ -228,13 +254,18 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     /// one line per refused pinned trust with its codes. It defaults to
     /// a WoodpatchCore logger so a direct init can't skip it; apps pass their own
     /// (via `TrustPinning.pinnedSession`) to keep their subsystem filter.
+    ///
+    /// `allowIP` is passed to `validatedPinnedHost`: the init and an app's
+    /// pre-check must use the same value, or a host the app accepted fails closed
+    /// here (the reviewer's M1 on core #17).
     public init(
         pinnedHost: String,
+        allowIP: Bool = false,
         anchors: [SecCertificate],
         clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
         logger: Logger = Logger(subsystem: "WoodpatchCore", category: "TrustPinning")
     ) {
-        self.pinnedHost = Self.validatedPinnedHost(pinnedHost)
+        self.pinnedHost = Self.validatedPinnedHost(pinnedHost, allowIP: allowIP)
         self.anchors = anchors
         self.clientCredential = clientCredential
         self.logger = logger
@@ -356,59 +387,32 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
         return lower
     }
 
-    /// The normalised pinned host, or nil if it isn't a DNS name or a canonical
-    /// IPv4 literal. A DNS name is dot-separated LDH labels (a-z, 0-9, '-'), each
-    /// 1-63 characters and not starting or ending with '-', at most 253 in all,
-    /// whose LAST label isn't all digits (a TLD never is, RFC 3696 §2). A name
-    /// ending in an all-digit label must be a canonical dotted quad: four decimal
-    /// octets 0-255 with no leading zeros. Otherwise "010.0.0.5", "1.1.1",
-    /// "256.1.1.1" or "2130706433" would be accepted, never equal the URL's
-    /// canonical "10.0.0.5", and leave the REAL host on system trust.
-    /// Anything else is a configuration error that would otherwise pin nothing:
-    /// a URL, a port, a path, whitespace, an empty label, non-ASCII (use the
-    /// punycode form), or an IPv6 literal (not supported).
+    /// The normalised pinned host, or nil if it isn't one (v1.15, BOS #5566: the
+    /// rule is `HostName.problem`, shared with the apps' configured hosts).
+    ///
+    /// The host is normalised first (lower case, trailing root dots dropped, as
+    /// `normalised` does for every challenge host), so "Pinned.Example.Test." pins
+    /// "pinned.example.test". Then it must pass `HostName.problem`: an FQDN of at
+    /// least two LDH labels whose last label starts with a letter, with no scheme,
+    /// port, path or whitespace. A single label ("localhost") is refused; so are
+    /// "0x7f.0x1", non-ASCII (use the punycode form) and IPv6.
+    ///
+    /// An IP address pins only when the caller passes `allowIP: true` (a dev
+    /// server), and only as a canonical dotted quad. Pass the same `allowIP` to
+    /// `pinnedSession` / the delegate's init, so the session pins what this accepted. Production configuration
+    /// can't pin an IP by accident, and no non-canonical form ("127.1",
+    /// "010.0.0.1", "2130706433") is ever accepted: it would never equal the URL's
+    /// canonical host and would leave the REAL host on system trust.
+    ///
+    /// Anything refused is a configuration error that would otherwise pin
+    /// nothing, so the delegate fails closed on it.
     ///
     /// Public since v1.6, so an app derives its API base URL from exactly the
     /// host this delegate will pin, and refuses a configuration the pin would
     /// reject up front (a config error, not "can't reach the server") (POS #25 review).
-    public static func validatedPinnedHost(_ host: String) -> String? {
+    public static func validatedPinnedHost(_ host: String, allowIP: Bool = false) -> String? {
         let host = normalised(host)
-        guard !host.isEmpty, host.utf8.count <= 253 else { return nil }
-        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
-        for label in labels {
-            let bytes = label.utf8
-            guard (1 ... 63).contains(bytes.count),
-                  bytes.first != UInt8(ascii: "-"), bytes.last != UInt8(ascii: "-"),
-                  bytes.allSatisfy(isLDH)
-            else { return nil }
-        }
-        if let last = labels.last, last.utf8.allSatisfy(isDigit) {
-            return isCanonicalIPv4(labels) ? host : nil
-        }
-        return host
-    }
-
-    /// Exactly four decimal octets, each 0-255, with no leading zeros.
-    private static func isCanonicalIPv4(_ labels: [Substring]) -> Bool {
-        labels.count == 4 && labels.allSatisfy { octet in
-            octet.utf8.allSatisfy(isDigit)
-                && octet.utf8.count <= 3
-                && (octet.utf8.count == 1 || octet.utf8.first != UInt8(ascii: "0"))
-                && (Int(octet).map { $0 <= 255 } ?? false)
-        }
-    }
-
-    private static func isDigit(_ byte: UInt8) -> Bool {
-        (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte)
-    }
-
-    private static func isLDH(_ byte: UInt8) -> Bool {
-        switch byte {
-        case UInt8(ascii: "a") ... UInt8(ascii: "z"), UInt8(ascii: "0") ... UInt8(ascii: "9"), UInt8(ascii: "-"):
-            true
-        default:
-            false
-        }
+        return HostName.problem(host, allowIP: allowIP) == nil ? host : nil
     }
 
     public func urlSession(
