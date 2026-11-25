@@ -175,8 +175,14 @@ public enum TrustPinning {
     /// not `.default`, so a caller that forgets it gets no URL cache, no cookies
     /// and no credential store on its pinned host. A caller that needs more passes
     /// its own (the till passes ephemeralConfiguration() plus a resource timeout).
+    ///
+    /// `allowIP` (v1.15) lets a dev server's canonical IPv4 address be the
+    /// pinned host. It goes to the delegate's `validatedPinnedHost` check, so an
+    /// app that pre-checks a host with `validatedPinnedHost(_, allowIP: true)`
+    /// gets a session that pins exactly that host, never one that refuses it.
     public static func pinnedSession(
         pinnedHost: String,
+        allowIP: Bool = false,
         anchors: [SecCertificate],
         logger: Logger,
         clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
@@ -190,6 +196,7 @@ public enum TrustPinning {
         }
         let delegate = PinnedSessionDelegate(
             pinnedHost: pinnedHost,
+            allowIP: allowIP,
             anchors: anchors,
             clientCredential: clientCredential,
             logger: logger
@@ -247,13 +254,18 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     /// one line per refused pinned trust with its codes. It defaults to
     /// a WoodpatchCore logger so a direct init can't skip it; apps pass their own
     /// (via `TrustPinning.pinnedSession`) to keep their subsystem filter.
+    ///
+    /// `allowIP` is passed to `validatedPinnedHost`: the init and an app's
+    /// pre-check must use the same value, or a host the app accepted fails closed
+    /// here (the reviewer's M1 on core #17).
     public init(
         pinnedHost: String,
+        allowIP: Bool = false,
         anchors: [SecCertificate],
         clientCredential: (@Sendable () -> ClientTLSCredential?)? = nil,
         logger: Logger = Logger(subsystem: "WoodpatchCore", category: "TrustPinning")
     ) {
-        self.pinnedHost = Self.validatedPinnedHost(pinnedHost)
+        self.pinnedHost = Self.validatedPinnedHost(pinnedHost, allowIP: allowIP)
         self.anchors = anchors
         self.clientCredential = clientCredential
         self.logger = logger
@@ -386,7 +398,8 @@ public final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @uncheck
     /// "0x7f.0x1", non-ASCII (use the punycode form) and IPv6.
     ///
     /// An IP address pins only when the caller passes `allowIP: true` (a dev
-    /// server), and only as a canonical dotted quad. Production configuration
+    /// server), and only as a canonical dotted quad. Pass the same `allowIP` to
+    /// `pinnedSession` / the delegate's init, so the session pins what this accepted. Production configuration
     /// can't pin an IP by accident, and no non-canonical form ("127.1",
     /// "010.0.0.1", "2130706433") is ever accepted: it would never equal the URL's
     /// canonical host and would leave the REAL host on system trust.

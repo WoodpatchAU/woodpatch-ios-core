@@ -167,7 +167,8 @@ struct PinnedSessionDelegateTests {
     private func delegate(
         credential: ClientTLSCredential? = nil,
         box: CredentialBox? = nil,
-        pinnedHost: String = "Pinned.Example.Test" // host match is case-insensitive
+        pinnedHost: String = "Pinned.Example.Test", // host match is case-insensitive
+        allowIP: Bool = false
     ) -> PinnedSessionDelegate {
         // Built explicitly: a closure-returning `Optional.map` crashes the type checker.
         var source: CredentialBox? = box
@@ -176,6 +177,7 @@ struct PinnedSessionDelegateTests {
         if let source { provider = { source.current } }
         return PinnedSessionDelegate(
             pinnedHost: pinnedHost,
+            allowIP: allowIP,
             anchors: [Fixtures.certificate("trusted-ca")],
             clientCredential: provider
         )
@@ -298,12 +300,53 @@ struct PinnedSessionDelegateTests {
         #expect(PinnedSessionDelegate.validatedPinnedHost(pinned) == nil, "an IP pinned by default")
     }
 
+    /// The reviewer's M1 on core #17: the pin agrees with the pre-check. A
+    /// delegate built with allowIP pins the canonical IP: it offers the identity
+    /// to that IP's client-certificate challenge and leaves other hosts on default
+    /// handling. Without allowIP, the same host takes the fail-closed path: every
+    /// server-trust challenge is cancelled and no identity is offered.
+    @Test(arguments: ["10.0.0.5", "10.0.0.5."])
+    func aDelegateWithAllowIPPinsTheIP(pinned: String) {
+        let identity = ClientTLSCredential(identity: Fixtures.clientIdentity())
+        let pinning = delegate(credential: identity, pinnedHost: pinned, allowIP: true)
+        let (cd, cc) = pinning.disposition(for: challenge(host: "10.0.0.5", method: NSURLAuthenticationMethodClientCertificate))
+        #expect(cd == .useCredential && cc != nil, "the pinned IP is the pinned host")
+        #expect(pinning.disposition(for: challenge(host: "elsewhere.test", method: NSURLAuthenticationMethodServerTrust)).0
+            == .performDefaultHandling, "a valid pin leaves other hosts alone")
+
+        let refusing = delegate(credential: identity, pinnedHost: pinned)
+        let (rd, rc) = refusing.disposition(for: challenge(host: "10.0.0.5", method: NSURLAuthenticationMethodClientCertificate))
+        #expect(rd == .performDefaultHandling && rc == nil, "an identity offered without allowIP")
+        for target in ["10.0.0.5", "elsewhere.test"] {
+            #expect(refusing.disposition(for: challenge(host: target, method: NSURLAuthenticationMethodServerTrust)).0
+                == .cancelAuthenticationChallenge, "the fail-closed path")
+        }
+    }
+
+    /// And pinnedSession passes allowIP through to its delegate.
+    @Test func pinnedSessionPassesAllowIPToItsDelegate() throws {
+        let identity = ClientTLSCredential(identity: Fixtures.clientIdentity())
+        for allowIP in [true, false] {
+            let session = TrustPinning.pinnedSession(pinnedHost: "10.0.0.5", allowIP: allowIP,
+                                                     anchors: [Fixtures.certificate("trusted-ca")],
+                                                     logger: Logger(subsystem: "test", category: "pinning"),
+                                                     clientCredential: { identity })
+            defer { session.invalidateAndCancel() }
+            let pinning = try #require(session.delegate as? PinnedSessionDelegate)
+            let (d, c) = pinning.disposition(for: challenge(host: "10.0.0.5", method: NSURLAuthenticationMethodClientCertificate))
+            #expect((d == .useCredential && c != nil) == allowIP)
+        }
+    }
+
     /// Even with allowIP, no inet_aton alias pins: each reads as some address to
     /// a resolver but never equals the URL's canonical host.
     @Test(arguments: ["127.1", "0177.0.0.1", "127.000.0.1", "010.0.0.1", "0x7f.0.0.1", "0x7f.0x1",
                       "2130706433", "256.1.1.1", "1.2.3", "::1", "[::1]"])
     func noIPAliasPinsEvenWithAllowIP(pinned: String) {
         #expect(PinnedSessionDelegate.validatedPinnedHost(pinned, allowIP: true) == nil)
+        #expect(delegate(pinnedHost: pinned, allowIP: true)
+            .disposition(for: challenge(host: "elsewhere.test", method: NSURLAuthenticationMethodServerTrust)).0
+            == .cancelAuthenticationChallenge, "an alias must take the fail-closed path")
     }
 
     /// v1.15 (#5566): pinnedSession's default configuration keeps nothing, so a
