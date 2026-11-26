@@ -226,11 +226,17 @@ struct APIRefusalTests {
         #expect(body == String(repeating: "a", count: APIRefusal.maxCarriedBodyBytes - tail.count))
     }
 
-    /// A complete surrogate (CESU-8) inside the cap is never carried, whatever
-    /// the platform's own decoder thinks of it.
-    @Test func aWholeSurrogateIsNotUTF8() {
-        let body = malformedBody { try decode(Data([0x41, 0xED, 0xA0, 0x80, 0x41]), reply(status: 502)) }
+    /// A whole invalid sequence inside the cap is never carried, whatever the
+    /// platform's own decoder thinks of it: a surrogate (CESU-8), overlongs
+    /// (2-, 3- and 4-byte), and a scalar above U+10FFFF. These pin
+    /// isStrictUTF8 itself, which the model test below uses as its reference
+    /// (the reviewer's r3 nit).
+    @Test(arguments: [[0xED, 0xA0, 0x80], [0xC0, 0x80], [0xC1, 0xBF], [0xE0, 0x80, 0x80],
+                      [0xF0, 0x80, 0x80, 0x80], [0xF4, 0x90, 0x80, 0x80]] as [[UInt8]])
+    func aWholeInvalidSequenceIsNotUTF8(sequence: [UInt8]) {
+        let body = malformedBody { try decode(Data([0x41] + sequence + [0x41]), reply(status: 502)) }
         #expect(body == "")
+        #expect(!APIRefusal.isStrictUTF8([0x41] + sequence + [0x41]))
     }
 
     /// The reviewer's model, as a test: every tail of up to three bytes from an
