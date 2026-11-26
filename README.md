@@ -30,7 +30,7 @@ reviewer does a security pass on pinning and keychain changes.
 
 | File | What | From the softphone |
 |---|---|---|
-| `Transport.swift` | `URLSession` seam. **v1.14:** `send(_:maxBytes:)`, a REQUIRED second method: the cap holds while the bytes arrive (an announced length over it is refused before the body, a stream past it is cancelled at the byte); `ResponseTooLarge` (carries the cap only) and its `check(_:maxBytes:)` for stubs | was one method; the second has no default on purpose |
+| `Transport.swift` | `URLSession` seam. **v1.14:** `send(_:maxBytes:)`, a REQUIRED second method: the cap holds while the bytes arrive (an announced length over it is refused before the body, a stream past it is cancelled at the byte); `ResponseTooLarge` (carries the cap only) and its `check(_:maxBytes:)` for stubs. **v1.15.1:** URLSession's `send(_:maxBytes:)` passes the session's own delegate to `bytes(for:delegate:)`, so a pinned session's pin, client certificate and redirect refusal apply to it (they silently didn't in v1.14-v1.15) | was one method; the second has no default on purpose |
 | `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option date formatters instead of one per date field (BOS #5481); the same parse, pinned against the old path; public `date(from:)`. **v1.15:** an unparseable date's decode error no longer carries the value | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIRefusal.swift` | **v1.16:** when a reply is the SERVER's answer: `requireFromPinnedOrigin` on every reply (https, the pinned host lower-cased with no trailing dot, the pinned port; the final URL after any redirect), and `decode(data:response:pinned:)` for a refusal (the status read from the reply; a 2xx is `.decode`, never a refusal): pinned origin, JSON media type (ASCII case only), the envelope with `success: false` and an `error`, a code of 1-64 `[A-Za-z0-9_]`, the message cut to 500 Unicode scalars and the request id to 128. Otherwise `.malformedErrorResponse`, carrying at most 512 B of whole UTF-8 (a character split by the cap is dropped), and nothing when the reply isn't HTTP, the origin or type failed, or the carried bytes aren't strict UTF-8 (RFC 3629, by the standard library's decoder; only a VALID start of a character the cap cut is dropped, and bytes past the cap are never read). `APIEnvelope.requirePayload()`: a 2xx that isn't a success with data is `.decode` | from the till's POSAPIClient (#2880), with the reviewer's A1-A4 on #5562 |
@@ -157,6 +157,20 @@ regenerating them would only prove the code agrees with itself.
   instead of `.default`. Neither app relies on the default: the till passes its own, and the staff app
   pins through its own `APIPinning` until #5567. `APIClientError.isCancellation(_:)` is lifted from
   the till. `JSONCoding`'s date decode error drops the wire value.
+- **v1.15.1, a fix: the byte-capped send uses the session's delegate** (BOS #5678). `bytes(for:)`
+  with no task delegate never asks the session's delegate about a challenge or a redirect (measured
+  on macOS 27: `data(for:)` does, `bytes(for:)` doesn't, and `bytes(for:delegate:)` given it does).
+  So from v1.14, `send(_:maxBytes:)` on a pinned session skipped the pin, the client certificate and
+  the redirect refusal. A private-CA host failed closed: every MMS picture in the staff app's build 81.
+  A public-CA host would have failed OPEN, on system trust. Upgrade if you call `send(_:maxBytes:)`.
+  **A pinned session's delegate must adopt `URLSessionTaskDelegate`** (as `PinnedSessionDelegate`
+  does) for its decision to reach this path: a delegate that's only a `URLSessionDelegate` makes the
+  send throw `TransportError.sessionDelegateNotTaskDelegate` before any request (fail-closed, r2). A
+  session with no delegate keeps the system default.
+  On macOS 27 the server-trust challenge reaches the SESSION-level
+  `urlSession(_:didReceive:completionHandler:)`, never the task-level one, even when both exist
+  (BOS #5681's real-TLS probe), so `PinnedSessionDelegate` keeps both with one decision: don't trim
+  it to a task-level-only handler.
 - **v1.16, `APIRefusal`** (BOS #5562, the reviewer's #5552 audit item 4). New public API, nothing
   changed. Both apps read a refusal by the same rules, so a captive portal's page or another host's
   reply can never end a session or wipe a credential. Rules in the file header. **A wipe stays each
