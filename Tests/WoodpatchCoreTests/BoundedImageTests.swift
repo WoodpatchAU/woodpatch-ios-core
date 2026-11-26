@@ -149,6 +149,53 @@ struct ByteCappedSendTests {
         await #expect(throws: ResponseTooLarge(maxBytes: 0)) { try await session().send(request("/zero"), maxBytes: 0) }
     }
 
+    /// v1.15.1 (BOS #5678): the streamed task carries the SESSION'S OWN delegate as its task
+    /// delegate. Without it, a real TLS handshake on the `bytes(for:)` path never asks the session
+    /// delegate (measured on macOS 27 against an untrusted-cert host: `data(for:)` asked it once,
+    /// `bytes(for:)` never, and failed -1202), so a pinned session's pin, client certificate and
+    /// redirect refusal didn't apply. A stub protocol can't show that gap (its challenges and
+    /// redirects reach the session delegate either way), so this pins the cause: what the
+    /// session hands the task it creates. Without the fix, `task.delegate` is nil.
+    @Test func theStreamedTaskCarriesTheSessionsDelegate() async throws {
+        final class Recorder: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+            private let lock = NSLock()
+            private var seen: [Bool] = []
+            var tasksGivenThisDelegate: [Bool] { lock.withLock { seen } }
+            func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+                let isSelf = task.delegate === self
+                lock.withLock { seen.append(isSelf) }
+            }
+        }
+        let recorder = Recorder()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedStub.self]
+        let session = URLSession(configuration: configuration, delegate: recorder, delegateQueue: nil)
+        ChunkedStub.serve(chunks: [Data(count: 10)], announce: nil)
+        _ = try await session.send(request("/delegate"), maxBytes: 1_000)
+        #expect(recorder.tasksGivenThisDelegate == [true])
+    }
+
+    /// r2 (reviewer M1 on core #20): a session delegate that can't be the task's delegate (a
+    /// plain URLSessionDelegate) is refused before any request, never silently dropped.
+    @Test func aDelegateThatIsntATaskDelegateIsRefusedAndNothingIsSent() async {
+        final class SessionOnly: NSObject, URLSessionDelegate, @unchecked Sendable {}
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedStub.self]
+        let session = URLSession(configuration: configuration, delegate: SessionOnly(), delegateQueue: nil)
+        ChunkedStub.serve(chunks: [Data(count: 10)], announce: nil)
+        await #expect(throws: TransportError.sessionDelegateNotTaskDelegate) {
+            try await session.send(request("/session-only"), maxBytes: 1_000)
+        }
+        #expect(ChunkedStub.starts == 0, "nothing was sent")
+    }
+
+    /// And a session with no delegate keeps the system default (an unpinned session).
+    @Test func aSessionWithNoDelegateStillSends() async throws {
+        ChunkedStub.serve(chunks: [Data(count: 10)], announce: nil)
+        #expect(try await session().send(request("/no-delegate"), maxBytes: 1_000).0.count == 10)
+        #expect(ChunkedStub.starts == 1)
+    }
+
     @Test func aStubsCheck() throws {
         #expect(try ResponseTooLarge.check(Data(count: 10), maxBytes: 10).count == 10)
         #expect(throws: ResponseTooLarge(maxBytes: 9)) { try ResponseTooLarge.check(Data(count: 10), maxBytes: 9) }
@@ -163,17 +210,22 @@ struct ByteCappedSendTests {
 final class ChunkedStub: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var chunks: [Data] = []
     nonisolated(unsafe) private static var announce: Int?
+    nonisolated(unsafe) private static var started = 0
     private static let lock = NSLock()
 
+    /// Sets what the next requests get, and zeroes the count of requests started.
     static func serve(chunks: [Data], announce: Int?) {
-        lock.withLock { self.chunks = chunks; self.announce = announce }
+        lock.withLock { self.chunks = chunks; self.announce = announce; self.started = 0 }
     }
+
+    /// How many requests reached the stub since the last `serve`.
+    static var starts: Int { lock.withLock { started } }
 
     override class func canInit(with _: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        let (chunks, announce) = Self.lock.withLock { (Self.chunks, Self.announce) }
+        let (chunks, announce) = Self.lock.withLock { Self.started += 1; return (Self.chunks, Self.announce) }
         var headers = ["Content-Type": "application/octet-stream"]
         if let announce { headers["Content-Length"] = String(announce) }
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!

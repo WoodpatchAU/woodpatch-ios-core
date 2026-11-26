@@ -53,6 +53,13 @@ public struct ResponseTooLarge: Error, Equatable, Sendable {
     }
 }
 
+/// v1.15.1 r2 (reviewer M1 on core #20): the session has a delegate that can't be the task's
+/// delegate, so its trust decision can't reach `send(_:maxBytes:)`. Refused before any request:
+/// going on without it would be v1.14's silent system-trust path again.
+public enum TransportError: Error, Equatable, Sendable {
+    case sessionDelegateNotTaskDelegate
+}
+
 extension URLSession: Transport {
     public func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
         try await data(for: request)
@@ -60,9 +67,32 @@ extension URLSession: Transport {
 
     /// Streamed: the announced length is checked before the body, and the body is counted as
     /// it arrives. Either way past the cap, the task is cancelled and nothing more is read.
+    ///
+    /// v1.15.1 (BOS #5678): the session's OWN delegate is passed as the task's delegate.
+    /// `bytes(for:)` without one never asks the session delegate about a challenge or a
+    /// redirect, so a pinned session's pin, client certificate and redirect refusal all
+    /// silently didn't apply. On a private-CA host that failed closed (-1202 before any
+    /// request: every MMS picture in the staff app's build 81); on a public-CA host it would
+    /// have failed OPEN, trusting the system roots. Measured on macOS 27: `data(for:)` asks the
+    /// session delegate, `bytes(for:)` doesn't, and `bytes(for:delegate:)` with it does.
+    ///
+    /// r2 (reviewer M1): fail-closed. A session delegate that isn't a `URLSessionTaskDelegate`
+    /// (one implementing only the session-level challenge) can't be handed over, so the send
+    /// throws `TransportError.sessionDelegateNotTaskDelegate` and sends nothing. A pinned
+    /// delegate must adopt `URLSessionTaskDelegate`, as `PinnedSessionDelegate` does. A session
+    /// with NO delegate keeps the system default, which is right for an unpinned session.
     public func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, URLResponse) {
         guard maxBytes > 0 else { throw ResponseTooLarge(maxBytes: maxBytes) }
-        let (bytes, response) = try await bytes(for: request)
+        let taskDelegate: URLSessionTaskDelegate?
+        if let sessionDelegate = delegate {
+            guard let asTask = sessionDelegate as? URLSessionTaskDelegate else {
+                throw TransportError.sessionDelegateNotTaskDelegate
+            }
+            taskDelegate = asTask
+        } else {
+            taskDelegate = nil
+        }
+        let (bytes, response) = try await bytes(for: request, delegate: taskDelegate)
         // -1 is "unknown" (chunked): then only the count below decides.
         if response.expectedContentLength > Int64(maxBytes) {
             bytes.task.cancel()
