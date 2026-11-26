@@ -82,7 +82,12 @@ public final class KeyedLoader<Key: Hashable & Sendable, Value: Sendable> {
     /// Bumped by removeAll().
     private var generation = 0
     /// How often each key was removed since the last removeAll() (which clears
-    /// it: the generation covers everything then).
+    /// it: the generation covers everything then). An entry is never dropped
+    /// earlier, even when no caller waits on its key: a caller already answered
+    /// but not yet resumed isn't a waiter, yet it still compares against the
+    /// count it took on entry, so a count dropped back to 0 could match a stale
+    /// one (the reviewer's r1 M1 window). It's bounded by the distinct keys
+    /// removed between wipes.
     private var removals: [Key: Int] = [:]
 
     /// Tests only: runs at the end of every load's finish, after its callers
