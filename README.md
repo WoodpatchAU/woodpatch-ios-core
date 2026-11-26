@@ -166,6 +166,10 @@ regenerating them would only prove the code agrees with itself.
   does) for its decision to reach this path: a delegate that's only a `URLSessionDelegate` makes the
   send throw `TransportError.sessionDelegateNotTaskDelegate` before any request (fail-closed, r2). A
   session with no delegate keeps the system default.
+  On macOS 27 the server-trust challenge reaches the SESSION-level
+  `urlSession(_:didReceive:completionHandler:)`, never the task-level one, even when both exist
+  (BOS #5681's real-TLS probe), so `PinnedSessionDelegate` keeps both with one decision: don't trim
+  it to a task-level-only handler.
 - **v1.16, `APIRefusal`** (BOS #5562, the reviewer's #5552 audit item 4). New public API, nothing
   changed. Both apps read a refusal by the same rules, so a captive portal's page or another host's
   reply can never end a session or wipe a credential. Rules in the file header. **A wipe stays each
