@@ -50,6 +50,7 @@ private final class Flag {
 }
 
 @MainActor
+@Suite(.timeLimit(.minutes(1)))
 struct KeyedLoaderTests {
     private func loader(countLimit: Int = 0, costLimit: Int = 0,
                         stillGood: @escaping @MainActor (String) -> Bool = { _ in true }) -> KeyedLoader<String, String> {
@@ -182,10 +183,14 @@ struct KeyedLoaderTests {
         let joiner = Gate()
         let c = call(l, "k", joiner)
         await settle()
+        // Checked BEFORE awaiting c: had the late cleanup removed the second
+        // load, c would wait on its own gate for ever (r1 nit).
+        let joinerStarted = await joiner.starts
+        #expect(joinerStarted == 0, "the joiner joined the second load")
+        if joinerStarted > 0 { await joiner.open(.success("a load of its own")) }
         await second.open(.success("new"))
         #expect(try await b.value == "new")
-        #expect(try await c.value == "new", "the joiner joined the second load")
-        #expect(await joiner.starts == 0)
+        #expect(try await c.value == "new")
     }
 
     // MARK: - The wipe (K2, K6)
@@ -206,6 +211,71 @@ struct KeyedLoaderTests {
         let after = Gate()
         await after.open(.success("after"))
         #expect((try? await call(l, "k", after).value) == "after")
+    }
+
+    /// The reviewer's r1 M1: the load has ANSWERED (its callers' resumptions
+    /// are queued) when a wipe runs. The hook runs removeAll() in exactly that
+    /// window, synchronously, at the end of finish. Neither the starter nor the
+    /// joiner may get the value, and nothing stays cached.
+    @Test func aWipeAfterTheLoadAnsweredButBeforeItsCallersRunStillWins() async {
+        let l = loader(), gate = Gate()
+        let starter = call(l, "k", gate)
+        await settle()
+        let joiner = call(l, "k", gate)
+        await settle()
+        l.afterFinish = { l.removeAll() }
+        await gate.open(.success("before the wipe"))
+        #expect(isCancellation(await starter.result))
+        #expect(isCancellation(await joiner.result))
+        l.afterFinish = nil
+        let after = Gate()
+        await after.open(.success("after"))
+        #expect((try? await call(l, "k", after).value) == "after", "nothing from before the wipe was kept")
+    }
+
+    @Test func removingTheKeyAfterTheLoadAnsweredStillWins() async {
+        let l = loader(), gate = Gate()
+        let starter = call(l, "k", gate)
+        await settle()
+        let joiner = call(l, "k", gate)
+        await settle()
+        l.afterFinish = { l.remove("k") }
+        await gate.open(.success("before the remove"))
+        #expect(isCancellation(await starter.result))
+        #expect(isCancellation(await joiner.result))
+        l.afterFinish = nil
+        let after = Gate()
+        await after.open(.success("after"))
+        #expect((try? await call(l, "k", after).value) == "after")
+    }
+
+    @Test func removingAnotherKeyAfterTheLoadAnsweredChangesNothing() async throws {
+        let l = loader(), gate = Gate()
+        let a = call(l, "k", gate)
+        await settle()
+        l.afterFinish = { l.remove("other") }
+        await gate.open(.success("v"))
+        #expect(try await a.value == "v")
+    }
+
+    /// The reviewer's r1 S1: the only caller is cancelled after it started the
+    /// load but before it waits. The hook cancels it in exactly that spot. The
+    /// load must still be stopped, and cache nothing.
+    @Test func aCallerCancelledBeforeItWaitsStillStopsItsLoad() async {
+        let l = loader(), gate = Gate()
+        l.beforeWait = { withUnsafeCurrentTask { $0?.cancel() } }
+        let task = call(l, "k", gate)
+        #expect(isCancellation(await task.result))
+        l.beforeWait = nil
+        await settle()
+        await gate.wake()
+        await settle()
+        #expect(await gate.starts == 1)
+        #expect(await gate.sawCancel, "the orphaned load was cancelled")
+        let after = Gate()
+        await after.open(.success("after"))
+        #expect((try? await call(l, "k", after).value) == "after", "the orphan cached nothing")
+        #expect(await after.starts == 1, "a new load, not the orphan")
     }
 
     @Test func removingAKeyDuringItsLoadCancelsItsCallersAndCachesNothing() async {
