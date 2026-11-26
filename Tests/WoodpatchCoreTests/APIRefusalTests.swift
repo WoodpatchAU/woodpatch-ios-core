@@ -95,6 +95,16 @@ struct APIRefusalTests {
         }
     }
 
+    /// The reviewer's r2 nit: only ASCII space and tab (OWS) are trimmed, so a
+    /// no-break or other Unicode space around the type fails.
+    @Test(arguments: [("\tapplication/json\t", true), ("  application/json ;charset=utf-8", true),
+                      ("\u{00A0}application/json", false), ("application/json\u{00A0}", false),
+                      ("\u{2003}application/json", false), ("\u{3000}application/json", false),
+                      ("\napplication/json", false)])
+    func onlyASCIISpaceAndTabAreTrimmed(contentType: String, json: Bool) {
+        #expect(APIRefusal.isJSON(contentType: contentType) == json)
+    }
+
     @Test func noContentTypeIsNotJSON() {
         #expect(malformedBody { try decode(envelope(), reply(contentType: nil)) } == "")
     }
@@ -187,6 +197,94 @@ struct APIRefusalTests {
         #expect(body == "")
     }
 
+    // MARK: - The carried body, strict UTF-8 at the cut (r2 S1)
+
+    /// 512 - tail.count ASCII bytes, then `tail` ending at byte 511, then more
+    /// bytes, so the cap always cuts right after `tail`.
+    private func cutAfter(_ tail: [UInt8]) -> Data {
+        Data(Array(repeating: UInt8(ascii: "a"), count: APIRefusal.maxCarriedBodyBytes - tail.count) + tail
+            + Array("more".utf8))
+    }
+
+    /// The reviewer's r2 cases: an invalid tail at the cut isn't a split
+    /// character, so it isn't dropped; it fails, and nothing is carried.
+    @Test(arguments: [[0xC0], [0xC1], [0xF5], [0xF7], // bytes that never lead
+                      [0xED, 0xA0], [0xED, 0xBF], // a surrogate's first two bytes
+                      [0xE0, 0x80], [0xE0, 0x9F], // an overlong 3-byte form
+                      [0xF0, 0x80, 0x80], [0xF0, 0x8F, 0xBF], // an overlong 4-byte form
+                      [0xF4, 0x90], [0xF4, 0x90, 0x80], [0xF4, 0xBF, 0xBF]] as [[UInt8]]) // above U+10FFFF
+    func anInvalidTailAtTheCutCarriesNothing(tail: [UInt8]) {
+        #expect(malformedBody { try decode(cutAfter(tail), reply(status: 502)) } == "")
+    }
+
+    /// A valid start of a character that the cap cut is dropped, and the rest
+    /// carried: the edges of each lead's allowed second byte.
+    @Test(arguments: [[0xC2], [0xDF], [0xE0], [0xE0, 0xA0], [0xED, 0x9F], [0xEF, 0xBF],
+                      [0xF0, 0x90], [0xF0, 0x90, 0x80], [0xF4, 0x8F, 0xBF], [0xF1, 0x80, 0x80]] as [[UInt8]])
+    func aValidStartAtTheCutIsDropped(tail: [UInt8]) {
+        let body = malformedBody { try decode(cutAfter(tail), reply(status: 502)) }
+        #expect(body == String(repeating: "a", count: APIRefusal.maxCarriedBodyBytes - tail.count))
+    }
+
+    /// A complete surrogate (CESU-8) inside the cap is never carried, whatever
+    /// the platform's own decoder thinks of it.
+    @Test func aWholeSurrogateIsNotUTF8() {
+        let body = malformedBody { try decode(Data([0x41, 0xED, 0xA0, 0x80, 0x41]), reply(status: 502)) }
+        #expect(body == "")
+    }
+
+    /// The reviewer's model, as a test: every tail of up to three bytes from an
+    /// alphabet of each byte class's edges, at the cut, against a reference that
+    /// asks the strict decoder directly. The answer is the longest prefix that
+    /// drops nothing but a character the cap split (a tail some continuation
+    /// completes into strict UTF-8), or "" when there's none.
+    @Test func everyTailAtTheCutMatchesAStrictDecoder() {
+        let alphabet: [UInt8] = [0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF,
+                                 0xE0, 0xE1, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF3, 0xF4, 0xF5, 0xF7, 0xF8, 0xFF]
+        var tails: [[UInt8]] = alphabet.map { [$0] }
+        for a in alphabet { for b in alphabet { tails.append([a, b]) } }
+        for a in alphabet { for b in alphabet { for c in alphabet { tails.append([a, b, c]) } } }
+        var mismatches: [[UInt8]] = []
+        for tail in tails {
+            let data = cutAfter(tail)
+            if APIRefusal.carried(data) != reference(Array(data.prefix(APIRefusal.maxCarriedBodyBytes))) {
+                mismatches.append(tail)
+            }
+        }
+        #expect(tails.count == 18_278)
+        #expect(mismatches.isEmpty, "\(mismatches.count) tails differ, first \(mismatches.prefix(5))")
+    }
+
+    /// The strict answer for a cut body, from the standard library's decoder.
+    private func reference(_ cut: [UInt8]) -> String {
+        for dropped in 0 ... 3 where dropped <= cut.count {
+            let kept = Array(cut.dropLast(dropped))
+            let tail = Array(cut.suffix(dropped))
+            guard APIRefusal.isStrictUTF8(kept), dropped == 0 || completes(tail) else { continue }
+            return String(decoding: kept, as: UTF8.self)
+        }
+        return ""
+    }
+
+    /// Whether some continuation bytes turn `tail` (1-3 bytes, cut short) into
+    /// exactly one strict scalar. Only the second byte is ever restricted, so
+    /// trying each second byte and padding with 0x80 covers every completion.
+    private func completes(_ tail: [UInt8]) -> Bool {
+        for length in (tail.count + 1) ... 4 {
+            let seconds: [UInt8] = tail.count >= 2 ? [tail[1]] : Array(0x80 ... 0xBF)
+            for second in seconds {
+                var bytes = Array(tail.prefix(1)) + [second] + Array(tail.dropFirst(2))
+                while bytes.count < length { bytes.append(0x80) }
+                var iterator = bytes.makeIterator()
+                var decoder = UTF8()
+                if case .scalarValue = decoder.decode(&iterator), case .emptyInput = decoder.decode(&iterator) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     @Test func aWholeShortUTF8BodyIsCarriedAsIs() {
         let body = malformedBody { try decode(Data("Bad Gateway: café".utf8), reply(status: 502)) }
         #expect(body == "Bad Gateway: café")
@@ -252,6 +350,14 @@ struct APIRefusalTests {
         #expect(malformedBody {
             try APIRefusal.requireFromPinnedOrigin(reply("https://other.example.test/x", status: 401), pinned: Self.pinned)
         } == "")
+    }
+
+    /// The reviewer's r2 nit: the same rule as decode, so a reply that isn't
+    /// HTTP never passes, even with the pinned URL.
+    @Test func aReplyThatIsntHTTPNeverPasses() {
+        let response = URLResponse(url: URL(string: "https://pinned.example.test/x")!, mimeType: "application/json",
+                                   expectedContentLength: 0, textEncodingName: nil)
+        #expect(malformedBody { try APIRefusal.requireFromPinnedOrigin(response, pinned: Self.pinned) } == "")
     }
 
     // MARK: - requirePayload
