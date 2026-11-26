@@ -149,6 +149,32 @@ struct ByteCappedSendTests {
         await #expect(throws: ResponseTooLarge(maxBytes: 0)) { try await session().send(request("/zero"), maxBytes: 0) }
     }
 
+    /// v1.15.1 (BOS #5678): the streamed task carries the SESSION'S OWN delegate as its task
+    /// delegate. Without it, a real TLS handshake on the `bytes(for:)` path never asks the session
+    /// delegate (measured on macOS 27 against an untrusted-cert host: `data(for:)` asked it once,
+    /// `bytes(for:)` never, and failed -1202), so a pinned session's pin, client certificate and
+    /// redirect refusal didn't apply. A stub protocol can't show that gap (its challenges and
+    /// redirects reach the session delegate either way), so this pins the cause: what the
+    /// session hands the task it creates. Without the fix, `task.delegate` is nil.
+    @Test func theStreamedTaskCarriesTheSessionsDelegate() async throws {
+        final class Recorder: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+            private let lock = NSLock()
+            private var seen: [Bool] = []
+            var tasksGivenThisDelegate: [Bool] { lock.withLock { seen } }
+            func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+                let isSelf = task.delegate === self
+                lock.withLock { seen.append(isSelf) }
+            }
+        }
+        let recorder = Recorder()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedStub.self]
+        let session = URLSession(configuration: configuration, delegate: recorder, delegateQueue: nil)
+        ChunkedStub.serve(chunks: [Data(count: 10)], announce: nil)
+        _ = try await session.send(request("/delegate"), maxBytes: 1_000)
+        #expect(recorder.tasksGivenThisDelegate == [true])
+    }
+
     @Test func aStubsCheck() throws {
         #expect(try ResponseTooLarge.check(Data(count: 10), maxBytes: 10).count == 10)
         #expect(throws: ResponseTooLarge(maxBytes: 9)) { try ResponseTooLarge.check(Data(count: 10), maxBytes: 9) }
