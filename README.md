@@ -162,3 +162,7 @@ regenerating them would only prove the code agrees with itself.
   So from v1.14, `send(_:maxBytes:)` on a pinned session skipped the pin, the client certificate and
   the redirect refusal. A private-CA host failed closed: every MMS picture in the staff app's build 81.
   A public-CA host would have failed OPEN, on system trust. Upgrade if you call `send(_:maxBytes:)`.
+  **A pinned session's delegate must adopt `URLSessionTaskDelegate`** (as `PinnedSessionDelegate`
+  does) for its decision to reach this path: a delegate that's only a `URLSessionDelegate` makes the
+  send throw `TransportError.sessionDelegateNotTaskDelegate` before any request (fail-closed, r2). A
+  session with no delegate keeps the system default.
