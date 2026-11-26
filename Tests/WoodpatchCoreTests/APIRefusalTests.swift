@@ -1,10 +1,12 @@
 // APIRefusalTests.swift (v1.16, BOS #5562)
 // ────────────────────────────────────────────────────────────────────
 // APIRefusal: a refusal counts as the server's answer only from the pinned
-// origin, as JSON, as the envelope, with a well-formed code. The till's own
-// cases (POSAPIClientTests, on prod since #2880) plus the reviewer's A5
-// additions: a trailing-dot host, an upper-case media type, the wrong scheme
-// or port, an oversized code or message.
+// origin, as JSON, as the envelope, with a well-formed code, and never on a
+// 2xx. The till's own cases (POSAPIClientTests, on prod since #2880), the
+// reviewer's A5 additions (a trailing-dot host, an upper-case media type, the
+// wrong scheme or port, an oversized code or message) and the r1 review: a
+// carried body is whole UTF-8 within the cap, a message is bounded in scalars,
+// the media type folds ASCII only, and a 2xx is never decoded.
 
 import Foundation
 import Testing
@@ -20,11 +22,15 @@ struct APIRefusalTests {
     }
 
     private func envelope(code: String = "NO_OPEN_SHIFT", message: String = "Open a shift first.",
-                          success: Bool = false) -> Data {
+                          success: Bool = false, requestId: String = "r-1") -> Data {
         let body: [String: Any] = ["success": success,
                                    "error": ["code": code, "message": message],
-                                   "meta": ["request_id": "r-1"]]
+                                   "meta": ["request_id": requestId]]
         return try! JSONSerialization.data(withJSONObject: body)
+    }
+
+    private func decode(_ data: Data, _ response: URLResponse) throws -> APIError {
+        try APIRefusal.decode(data: data, response: response, pinned: Self.pinned)
     }
 
     /// The body a malformed refusal carries, or nil if `run` didn't throw one.
@@ -39,32 +45,58 @@ struct APIRefusalTests {
         }
     }
 
+    private func isDecodeError(_ run: () throws -> Any) -> Bool {
+        do {
+            _ = try run()
+            return false
+        } catch APIClientError.decode {
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - decode
 
     @Test func aPinnedJSONEnvelopeIsTheServersAnswer() throws {
-        let error = try APIRefusal.decode(status: 409, data: envelope(), response: reply(), pinned: Self.pinned)
+        let error = try decode(envelope(), reply())
         #expect(error == APIError(statusCode: 409, rawCode: "NO_OPEN_SHIFT", message: "Open a shift first.", requestId: "r-1"))
+    }
+
+    /// The reviewer's r1 S2: a 2xx is never a refusal, whatever its body says,
+    /// so no app can key a wipe on one.
+    @Test(arguments: [200, 201, 204, 299])
+    func aTwoHundredIsNeverDecodedAsARefusal(status: Int) {
+        let data = envelope(code: "DEVICE_REVOKED")
+        #expect(isDecodeError { try decode(data, reply(status: status)) })
+    }
+
+    @Test func aReplyThatIsntHTTPIsMalformed() {
+        let response = URLResponse(url: URL(string: "https://pinned.example.test/x")!, mimeType: "application/json",
+                                   expectedContentLength: 0, textEncodingName: nil)
+        #expect(malformedBody { try decode(envelope(), response) } == "")
     }
 
     @Test(arguments: [("application/json", true), ("application/json; charset=utf-8", true),
                       ("Application/JSON", true), ("APPLICATION/JSON;charset=UTF-8", true),
                       (" application/json ", true),
                       ("application/jsonx", false), ("text/json", false), ("text/html", false),
-                      (";application/json", false), ("", false)])
+                      (";application/json", false), ("", false),
+                      // Only ASCII folds (r1 nit): a Unicode look-alike isn't JSON.
+                      ("application/ſon", false), ("applicatıon/json", false)])
     func onlyJSONIsDecoded(contentType: String, decoded: Bool) {
         let data = envelope()
         let response = reply(contentType: contentType)
         if decoded {
-            #expect((try? APIRefusal.decode(status: 409, data: data, response: response, pinned: Self.pinned)) != nil)
+            #expect((try? decode(data, response)) != nil)
         } else {
             // Not JSON: nothing of the body is carried.
-            #expect(malformedBody { try APIRefusal.decode(status: 409, data: data, response: response, pinned: Self.pinned) } == "")
+            #expect(malformedBody { try decode(data, response) } == "")
         }
     }
 
     @Test func noContentTypeIsNotJSON() {
-        let response = reply(contentType: nil)
-        #expect(malformedBody { try APIRefusal.decode(status: 409, data: envelope(), response: response, pinned: Self.pinned) } == "")
+        #expect(malformedBody { try decode(envelope(), reply(contentType: nil)) } == "")
     }
 
     /// The reviewer's A1: scheme, host and port, all of them; a trailing dot on
@@ -76,13 +108,13 @@ struct APIRefusalTests {
                       "https://sub.pinned.example.test/pos/v1/x",
                       "https://pinned.example.test.evil.test/x"])
     func anotherOriginsRefusalIsMalformedAndCarriesNothing(url: String) {
-        let response = reply(url)
-        #expect(malformedBody { try APIRefusal.decode(status: 401, data: envelope(code: "DEVICE_REVOKED"), response: response, pinned: Self.pinned) } == "")
+        let response = reply(url, status: 401)
+        #expect(malformedBody { try decode(envelope(code: "DEVICE_REVOKED"), response) } == "")
     }
 
     @Test(arguments: ["https://PINNED.example.test/pos/v1/x", "https://pinned.example.test:443/pos/v1/x"])
     func theSameOriginWrittenDifferentlyMatches(url: String) {
-        #expect((try? APIRefusal.decode(status: 409, data: envelope(), response: reply(url), pinned: Self.pinned)) != nil)
+        #expect((try? decode(envelope(), reply(url))) != nil)
     }
 
     @Test func aTrailingDotOnThePinnedHostMatchesNothing() {
@@ -102,68 +134,112 @@ struct APIRefusalTests {
         #expect(!APIRefusal.isFromPinnedOrigin(reply("http://pinned.example.test/x"), pinned: http))
     }
 
-    @Test func aReplyWithNoURLIsNotFromThePinnedOrigin() {
+    @Test func aReplyWithNoHostIsNotFromThePinnedOrigin() {
         let response = URLResponse(url: URL(string: "about:blank")!, mimeType: nil, expectedContentLength: 0, textEncodingName: nil)
         #expect(!APIRefusal.isFromPinnedOrigin(response, pinned: Self.pinned))
     }
 
     @Test func aSuccessEnvelopeOnAnErrorStatusIsMalformed() {
-        #expect(malformedBody { try APIRefusal.decode(status: 500, data: envelope(success: true), response: reply(), pinned: Self.pinned) } != nil)
+        #expect(malformedBody { try decode(envelope(success: true), reply(status: 500)) } != nil)
     }
 
     @Test func anEnvelopeWithNoErrorBlockIsMalformed() {
         let data = Data(#"{"success":false,"meta":{}}"#.utf8)
-        #expect(malformedBody { try APIRefusal.decode(status: 400, data: data, response: reply(), pinned: Self.pinned) } == #"{"success":false,"meta":{}}"#)
+        #expect(malformedBody { try decode(data, reply(status: 400)) } == #"{"success":false,"meta":{}}"#)
     }
+
+    // MARK: - The carried body (r1 M1)
 
     @Test func notJSONAtAllCarriesAtMost512Bytes() {
         let page = Data(String(repeating: "x", count: 4000).utf8)
-        let body = malformedBody { try APIRefusal.decode(status: 502, data: page, response: reply(), pinned: Self.pinned) }
+        let body = malformedBody { try decode(page, reply(status: 502)) }
         #expect(body?.utf8.count == APIRefusal.maxCarriedBodyBytes)
     }
 
-    @Test func aCutThroughAMultiByteCharacterIsReplacedNotACrash() {
-        // 511 ASCII bytes, then "é" (2 bytes): the cap cuts it in half.
+    /// 511 ASCII bytes then "é" (2 bytes): the cap would split it, so the cut
+    /// backs off to the whole character before it. No U+FFFD, never over 512.
+    @Test func aCutThroughAMultiByteCharacterBacksOffToABoundary() {
         let data = Data((String(repeating: "a", count: 511) + "é").utf8)
-        let body = malformedBody { try APIRefusal.decode(status: 502, data: data, response: reply(), pinned: Self.pinned) }
-        #expect(body?.hasSuffix("\u{FFFD}") == true)
+        let body = malformedBody { try decode(data, reply(status: 502)) }
+        #expect(body == String(repeating: "a", count: 511))
+        #expect(body?.contains("\u{FFFD}") == false)
     }
 
-    @Test func aBodyThatIsNotUTF8IsCarriedAsReplacements() {
-        let data = Data([0xFF, 0xFE, 0x00, 0x41])
-        let body = malformedBody { try APIRefusal.decode(status: 502, data: data, response: reply(), pinned: Self.pinned) }
-        #expect(body?.contains("\u{FFFD}") == true)
+    @Test(arguments: [1, 2, 3])
+    func aCutThroughAFourByteCharacterBacksOff(asciiBefore: Int) {
+        // A 4-byte emoji placed so the 512 cap splits it at every offset.
+        let lead = String(repeating: "a", count: APIRefusal.maxCarriedBodyBytes - 4 + asciiBefore)
+        let data = Data((lead + "🪵" + "tail").utf8)
+        let body = malformedBody { try decode(data, reply(status: 502)) }
+        #expect(body == lead)
+        #expect((body?.utf8.count ?? .max) <= APIRefusal.maxCarriedBodyBytes)
     }
 
-    /// The reviewer's A3: the code drives decisions, so a code outside 1-64 of
-    /// [A-Za-z0-9_] is malformed, not the server's answer.
+    /// 512 bytes that aren't UTF-8 at all carry nothing (they'd be 1,536 bytes
+    /// of U+FFFD otherwise).
+    @Test func aBodyThatIsNotUTF8CarriesNothing() {
+        let body = malformedBody { try decode(Data(repeating: 0xFF, count: 512), reply(status: 502)) }
+        #expect(body == "")
+    }
+
+    @Test func aBodyWithABadByteBeforeTheCutCarriesNothing() {
+        let body = malformedBody { try decode(Data([0x41, 0xFF, 0x41]), reply(status: 502)) }
+        #expect(body == "")
+    }
+
+    @Test func aWholeShortUTF8BodyIsCarriedAsIs() {
+        let body = malformedBody { try decode(Data("Bad Gateway: café".utf8), reply(status: 502)) }
+        #expect(body == "Bad Gateway: café")
+    }
+
+    // MARK: - The code, the message and the request id (A3, r1 S1)
+
+    /// The code drives decisions, so a code outside 1-64 of [A-Za-z0-9_] is
+    /// malformed, not the server's answer.
     @Test(arguments: ["", String(repeating: "A", count: 65), "NO OPEN", "NO-OPEN", "NÖ_OPEN", "NO_OPEN\n", "<script>"])
     func aBadCodeIsMalformed(code: String) {
-        #expect(malformedBody { try APIRefusal.decode(status: 409, data: envelope(code: code), response: reply(), pinned: Self.pinned) } != nil)
+        #expect(malformedBody { try decode(envelope(code: code), reply()) } != nil)
     }
 
     @Test(arguments: ["A", String(repeating: "A", count: 64), "cluster_conflict", "CARD_3DS_REQUIRED"])
     func aWellFormedCodeIsKept(code: String) throws {
-        let error = try APIRefusal.decode(status: 409, data: envelope(code: code), response: reply(), pinned: Self.pinned)
-        #expect(error.rawCode == code)
+        #expect(try decode(envelope(code: code), reply()).rawCode == code)
     }
 
-    @Test func aLongMessageIsCut() throws {
-        let error = try APIRefusal.decode(status: 422, data: envelope(message: String(repeating: "m", count: 5000)),
-                                          response: reply(), pinned: Self.pinned)
-        #expect(error.message.count == APIRefusal.maxMessageCharacters)
+    @Test func aLongMessageIsCutInScalars() throws {
+        let error = try decode(envelope(message: String(repeating: "m", count: 5000)), reply(status: 422))
+        #expect(error.message.unicodeScalars.count == APIRefusal.maxMessageScalars)
+    }
+
+    /// One Character can hold any number of combining marks: the cut counts
+    /// scalars, so 500 "characters" of zalgo can't run to megabytes.
+    @Test func aMessageOfCombiningMarksIsBoundedInBytes() throws {
+        let zalgo = String(repeating: "a" + String(repeating: "\u{0301}", count: 200), count: 100)
+        let error = try decode(envelope(message: zalgo), reply(status: 422))
+        #expect(error.message.unicodeScalars.count == APIRefusal.maxMessageScalars)
+        #expect(error.message.utf8.count <= APIRefusal.maxMessageScalars * 4)
+    }
+
+    @Test func aNonASCIIMessageIsKeptWhole() throws {
+        #expect(try decode(envelope(message: "Ouvrez une caisse d'abord — 先开班"), reply()).message
+            == "Ouvrez une caisse d'abord — 先开班")
+    }
+
+    @Test func aLongRequestIdIsCut() throws {
+        let error = try decode(envelope(requestId: String(repeating: "r", count: 10_000)), reply())
+        #expect(error.requestId?.unicodeScalars.count == APIRefusal.maxRequestIdScalars)
     }
 
     // MARK: - requireFromPinnedOrigin
 
     @Test func aPinnedReplyPasses() throws {
-        try APIRefusal.requireFromPinnedOrigin(reply(status: 200), status: 200, pinned: Self.pinned)
-        try APIRefusal.requireFromPinnedOrigin(reply(status: 500), status: 500, pinned: Self.pinned)
+        try APIRefusal.requireFromPinnedOrigin(reply(status: 200), pinned: Self.pinned)
+        try APIRefusal.requireFromPinnedOrigin(reply(status: 500), pinned: Self.pinned)
     }
 
     @Test func aSuccessFromElsewhereIsADecodeError() {
         do {
-            try APIRefusal.requireFromPinnedOrigin(reply("https://other.example.test/x", status: 200), status: 200, pinned: Self.pinned)
+            try APIRefusal.requireFromPinnedOrigin(reply("https://other.example.test/x", status: 200), pinned: Self.pinned)
             Issue.record("a 2xx from another origin passed")
         } catch let APIClientError.decode(underlying) {
             #expect(underlying as? ReplyOriginError == .notThePinnedOrigin)
@@ -174,7 +250,7 @@ struct APIRefusalTests {
 
     @Test func aRefusalFromElsewhereIsMalformedWithNoBody() {
         #expect(malformedBody {
-            try APIRefusal.requireFromPinnedOrigin(reply("https://other.example.test/x", status: 401), status: 401, pinned: Self.pinned)
+            try APIRefusal.requireFromPinnedOrigin(reply("https://other.example.test/x", status: 401), pinned: Self.pinned)
         } == "")
     }
 
