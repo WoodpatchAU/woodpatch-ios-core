@@ -90,7 +90,7 @@ struct KeyedLoaderTests {
         #expect(await gate.starts == 1)
     }
 
-    @Test func everyCallerGetsTheLoadsErrorAndNothingIsCached() async {
+    @Test func everyCallerGetsTheLoadsErrorAndNothingIsCached() async throws {
         let l = loader(), gate = Gate()
         let a = call(l, "k", gate), b = call(l, "k", gate)
         await settle()
