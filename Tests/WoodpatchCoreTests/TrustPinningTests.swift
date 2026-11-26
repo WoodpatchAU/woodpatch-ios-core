@@ -494,6 +494,22 @@ struct RedirectRefusalTests {
         #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
     }
 
+    /// v1.15.1 (BOS #5678): the byte-capped send goes through the session's delegate too.
+    /// `bytes(for:)` without a task delegate never asked it, so this redirect was followed
+    /// (two requests) and, on a real host, the pin and the client certificate were skipped.
+    @Test(arguments: [302, 307])
+    func theByteCappedSendRefusesARedirectToo(status: Int) async throws {
+        RedirectingProtocol.lock.withLock {
+            RedirectingProtocol.status = status
+            RedirectingProtocol.location = "https://elsewhere.example.test/next"
+            RedirectingProtocol.requests = []
+        }
+        let (_, response) = try await session().send(URLRequest(url: URL(string: "https://pinned.example.test/media")!),
+                                                     maxBytes: 1_000)
+        #expect((response as? HTTPURLResponse)?.statusCode == status)
+        #expect(RedirectingProtocol.lock.withLock { RedirectingProtocol.requests.count } == 1)
+    }
+
     @Test func aSameHostRedirectIsRefusedToo() async throws {
         RedirectingProtocol.lock.withLock {
             RedirectingProtocol.status = 302

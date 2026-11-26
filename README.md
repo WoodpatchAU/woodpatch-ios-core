@@ -30,7 +30,7 @@ reviewer does a security pass on pinning and keychain changes.
 
 | File | What | From the softphone |
 |---|---|---|
-| `Transport.swift` | `URLSession` seam. **v1.14:** `send(_:maxBytes:)`, a REQUIRED second method: the cap holds while the bytes arrive (an announced length over it is refused before the body, a stream past it is cancelled at the byte); `ResponseTooLarge` (carries the cap only) and its `check(_:maxBytes:)` for stubs | was one method; the second has no default on purpose |
+| `Transport.swift` | `URLSession` seam. **v1.14:** `send(_:maxBytes:)`, a REQUIRED second method: the cap holds while the bytes arrive (an announced length over it is refused before the body, a stream past it is cancelled at the byte); `ResponseTooLarge` (carries the cap only) and its `check(_:maxBytes:)` for stubs. **v1.15.1:** URLSession's `send(_:maxBytes:)` passes the session's own delegate to `bytes(for:delegate:)`, so a pinned session's pin, client certificate and redirect refusal apply to it (they silently didn't in v1.14-v1.15) | was one method; the second has no default on purpose |
 | `JSONCoding.swift` | BOS JSON conventions (ISO 8601 ± fractions). **v1.13:** two shared, fixed-option date formatters instead of one per date field (BOS #5481); the same parse, pinned against the old path; public `date(from:)`. **v1.15:** an unparseable date's decode error no longer carries the value | unchanged |
 | `APIEnvelope.swift` | `APIEnvelope<Payload, Meta>`, `APIStandardMeta`, `APIPagination`, `APIErrorBody` | meta made generic (apps add their own fields) |
 | `APIClientError.swift` | `APIClientError`, `APIError` (raw code). **v1.15:** `APIClientError.isCancellation(_:)` (CancellationError, NSURLErrorDomain -999, either wrapped in `.transport`) | typed code enums stay per app |
@@ -155,3 +155,10 @@ regenerating them would only prove the code agrees with itself.
   instead of `.default`. Neither app relies on the default: the till passes its own, and the staff app
   pins through its own `APIPinning` until #5567. `APIClientError.isCancellation(_:)` is lifted from
   the till. `JSONCoding`'s date decode error drops the wire value.
+
+- **v1.15.1, a fix: the byte-capped send uses the session's delegate** (BOS #5678). `bytes(for:)`
+  with no task delegate never asks the session's delegate about a challenge or a redirect (measured
+  on macOS 27: `data(for:)` does, `bytes(for:)` doesn't, and `bytes(for:delegate:)` given it does).
+  So from v1.14, `send(_:maxBytes:)` on a pinned session skipped the pin, the client certificate and
+  the redirect refusal. A private-CA host failed closed: every MMS picture in the staff app's build 81.
+  A public-CA host would have failed OPEN, on system trust. Upgrade if you call `send(_:maxBytes:)`.

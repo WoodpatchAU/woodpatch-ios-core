@@ -60,9 +60,17 @@ extension URLSession: Transport {
 
     /// Streamed: the announced length is checked before the body, and the body is counted as
     /// it arrives. Either way past the cap, the task is cancelled and nothing more is read.
+    ///
+    /// v1.15.1 (BOS #5678): the session's OWN delegate is passed as the task's delegate.
+    /// `bytes(for:)` without one never asks the session delegate about a challenge or a
+    /// redirect, so a pinned session's pin, client certificate and redirect refusal all
+    /// silently didn't apply. On a private-CA host that failed closed (-1202 before any
+    /// request: every MMS picture in the staff app's build 81); on a public-CA host it would
+    /// have failed OPEN, trusting the system roots. Measured on macOS 27: `data(for:)` asks the
+    /// session delegate, `bytes(for:)` doesn't, and `bytes(for:delegate:)` with it does.
     public func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, URLResponse) {
         guard maxBytes > 0 else { throw ResponseTooLarge(maxBytes: maxBytes) }
-        let (bytes, response) = try await bytes(for: request)
+        let (bytes, response) = try await bytes(for: request, delegate: delegate as? URLSessionTaskDelegate)
         // -1 is "unknown" (chunked): then only the count below decides.
         if response.expectedContentLength > Int64(maxBytes) {
             bytes.task.cancel()
