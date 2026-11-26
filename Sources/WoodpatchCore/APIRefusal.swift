@@ -20,8 +20,9 @@
 //      the session delegate (TrustPinning, v1.5): this is the second line,
 //      not the only one.
 //   2. Content-Type's media type is application/json, compared without ASCII
-//      case (RFC 9110) and without parameters. Only ASCII letters fold, so
-//      no Unicode look-alike passes. "application/jsonx", a leading ";" or no
+//      case (RFC 9110) and without parameters. Only ASCII letters fold, and
+//      only ASCII space and tab are trimmed (RFC 9110's OWS), so no Unicode
+//      look-alike or Unicode space passes. "application/jsonx", a leading ";" or no
 //      type at all fail.
 //   3. The body is the envelope with `success: false` and an `error` block.
 //   4. `error.code` is 1-64 of [A-Za-z0-9_]. `error.message` is cut to
@@ -29,8 +30,9 @@
 //      `maxRequestIdScalars`.
 // Anything else is `.malformedErrorResponse` (a 2xx is `.decode`). Its
 // carried body is at most `maxCarriedBodyBytes` of UTF-8, cut on a character
-// boundary, and EMPTY when rule 1 or 2 failed or the body isn't UTF-8, so
-// nothing from a portal or another host is carried at all.
+// boundary, and EMPTY when rule 0, 1 or 2 failed or the carried bytes aren't
+// strict UTF-8, so nothing from a portal or another host is carried at all.
+// Only the bytes within the cap are checked: bytes past it are never read.
 //
 // A WIPE (or any other irreversible step) stays each app's decision. It's
 // keyed on the CODE of an `APIError` that `decode` returned, never on a
@@ -60,12 +62,13 @@ public enum APIRefusal {
     /// The longest error code accepted.
     public static let maxCodeLength = 64
 
-    /// Throws unless `response` came from `pinned`'s origin. Call it on EVERY
-    /// reply, 2xx included, before reading the body. A 2xx from elsewhere is
-    /// `.decode(ReplyOriginError.notThePinnedOrigin)`, so nothing of it is
-    /// read; anything else is `.malformedErrorResponse` with an empty body.
+    /// Throws unless `response` is HTTP and came from `pinned`'s origin. Call
+    /// it on EVERY reply, 2xx included, before reading the body. A 2xx from
+    /// elsewhere is `.decode(ReplyOriginError.notThePinnedOrigin)`, so nothing
+    /// of it is read; anything else (a reply that isn't HTTP is status 0) is
+    /// `.malformedErrorResponse` with an empty body. The same rule as `decode`.
     public static func requireFromPinnedOrigin(_ response: URLResponse, pinned: URL) throws {
-        guard isFromPinnedOrigin(response, pinned: pinned) else {
+        guard response is HTTPURLResponse, isFromPinnedOrigin(response, pinned: pinned) else {
             let status = statusCode(response)
             if (200 ..< 300).contains(status) {
                 throw APIClientError.decode(underlying: ReplyOriginError.notThePinnedOrigin)
@@ -109,10 +112,18 @@ public enum APIRefusal {
     /// application/json. Up to the first ";" exactly, so ";application/json"
     /// is an empty type, not JSON.
     public static func isJSON(_ response: URLResponse) -> Bool {
-        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
-        let mediaType = String(contentType.prefix(while: { $0 != ";" })).trimmingCharacters(in: .whitespaces)
+        isJSON(contentType: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "")
+    }
+
+    /// The media-type rule on a Content-Type value itself. Only ASCII space
+    /// and tab are trimmed (OWS, RFC 9110), so a no-break or other Unicode
+    /// space around the type fails.
+    static func isJSON(contentType: String) -> Bool {
+        var got = Array(contentType.utf8.prefix(while: { $0 != UInt8(ascii: ";") }))
+        while let last = got.last, isOWS(last) { got.removeLast() }
+        let start = got.firstIndex(where: { !isOWS($0) }) ?? got.endIndex
+        got.removeSubrange(..<start)
         let want = Array("application/json".utf8)
-        let got = Array(mediaType.utf8)
         return got.count == want.count && zip(got, want).allSatisfy { asciiLower($0) == $1 }
     }
 
@@ -139,6 +150,10 @@ public enum APIRefusal {
         return Origin(host: host, port: url.port ?? 443)
     }
 
+    private static func isOWS(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: " ") || byte == UInt8(ascii: "\t")
+    }
+
     private static func asciiLower(_ byte: UInt8) -> UInt8 {
         (UInt8(ascii: "A") ... UInt8(ascii: "Z")).contains(byte) ? byte + 32 : byte
     }
@@ -162,29 +177,72 @@ public enum APIRefusal {
     }
 
     /// At most `maxCarriedBodyBytes` of the body, cut back to a whole UTF-8
-    /// character, or "" if what's left isn't valid UTF-8. Never a U+FFFD, so
-    /// the carried text is never longer than the cap.
-    private static func carried(_ data: Data) -> String {
+    /// character, or "" if what's left isn't strict UTF-8. Never a U+FFFD, so
+    /// the carried text is never longer than the cap. Bytes past the cap are
+    /// never read or validated.
+    static func carried(_ data: Data) -> String {
         var cut = Array(data.prefix(maxCarriedBodyBytes))
-        if data.count > cut.count {
-            // The cap may have split ONE character. Only that is dropped: the
-            // bytes from the last lead byte, when it announces more bytes than
-            // are left. Any other invalid byte stays in, and fails below.
-            var lead = cut.count - 1
-            while lead >= 0, lead >= cut.count - 4, cut[lead] & 0xC0 == 0x80 { lead -= 1 }
-            if lead >= 0, sequenceLength(cut[lead]) > cut.count - lead { cut.removeSubrange(lead...) }
-        }
-        return String(bytes: cut, encoding: .utf8) ?? ""
+        if data.count > cut.count, let start = splitCharacterStart(cut) { cut.removeSubrange(start...) }
+        return isStrictUTF8(cut) ? String(decoding: cut, as: UTF8.self) : ""
     }
 
-    /// How many bytes a UTF-8 sequence starting with `lead` has (1 for an
-    /// invalid lead, which then fails validation as itself).
+    /// Whether `bytes` are strict UTF-8 (RFC 3629: no overlongs, surrogates,
+    /// or scalars above U+10FFFF), by the standard library's decoder rather
+    /// than Foundation's, so the rule doesn't vary by platform.
+    static func isStrictUTF8(_ bytes: [UInt8]) -> Bool {
+        var iterator = bytes.makeIterator()
+        var decoder = UTF8()
+        while true {
+            switch decoder.decode(&iterator) {
+            case .scalarValue: continue
+            case .emptyInput: return true
+            case .error: return false
+            }
+        }
+    }
+
+    /// Where the character the cap split begins, or nil when the cap split
+    /// nothing. Split means: a VALID lead byte in the last three bytes, followed
+    /// only by continuation bytes the lead allows, and fewer of them than it
+    /// needs. That is exactly a strict decoder's "valid so far, but incomplete".
+    /// Any other tail (an invalid lead such as C0, C1 or F5-F7, a surrogate
+    /// ED A0-BF, an overlong E0 80-9F or F0 80-8F, or F4 90-BF above U+10FFFF)
+    /// isn't a split character, so it stays in and fails validation as itself.
+    static func splitCharacterStart(_ bytes: [UInt8]) -> Int? {
+        var lead = bytes.count - 1
+        while lead >= 0, lead >= bytes.count - 3, isContinuation(bytes[lead]) { lead -= 1 }
+        guard lead >= 0, !isContinuation(bytes[lead]) else { return nil }
+        let have = bytes.count - lead
+        guard sequenceLength(bytes[lead]) > have else { return nil }
+        if have >= 2, !secondByteRange(bytes[lead]).contains(bytes[lead + 1]) { return nil }
+        return lead
+    }
+
+    private static func isContinuation(_ byte: UInt8) -> Bool {
+        byte & 0xC0 == 0x80
+    }
+
+    /// How many bytes a UTF-8 sequence starting with `lead` has, or 1 for a
+    /// byte that can't lead one (C0, C1, F5-FF and the continuation bytes),
+    /// which then fails validation as itself (RFC 3629).
     private static func sequenceLength(_ lead: UInt8) -> Int {
         switch lead {
-        case 0xC0 ... 0xDF: 2
+        case 0xC2 ... 0xDF: 2
         case 0xE0 ... 0xEF: 3
-        case 0xF0 ... 0xF7: 4
+        case 0xF0 ... 0xF4: 4
         default: 1
+        }
+    }
+
+    /// The second bytes `lead` allows (RFC 3629): E0 and F0 refuse overlongs,
+    /// ED refuses the surrogates, F4 refuses anything above U+10FFFF.
+    private static func secondByteRange(_ lead: UInt8) -> ClosedRange<UInt8> {
+        switch lead {
+        case 0xE0: 0xA0 ... 0xBF
+        case 0xED: 0x80 ... 0x9F
+        case 0xF0: 0x90 ... 0xBF
+        case 0xF4: 0x80 ... 0x8F
+        default: 0x80 ... 0xBF
         }
     }
 }
